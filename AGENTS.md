@@ -37,6 +37,10 @@ GHCR_TOKEN=your_pat ./deploy/deploy-ghcr.sh
 
 The image is Debian-based because a host-provided `devin` binary is usually glibc-linked. The `devin` binary and `~/.config/devin` credentials are bind-mounted via `docker-compose.yml`.
 
+## Local development
+
+`api/.env` is loaded automatically by `internal/config.Load` (valo-style), so `make dev` works as soon as you fill in `.env`. Set `ENV_FILE` to use a different env file.
+
 ## Notes
 
 - The server needs `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_WEBHOOK_SECRET`, `DEVIN_BIN`, `WORKSPACE_BASE`, and `DEVIN_CONFIG_PATH`.

@@ -6,6 +6,7 @@ require (
 	github.com/bradleyfalzon/ghinstallation/v2 v2.19.0
 	github.com/google/go-github/v88 v88.0.0
 	github.com/jackc/pgx/v5 v5.9.1
+	github.com/joho/godotenv v1.5.1
 	go.etcd.io/bbolt v1.3.10
 	golang.org/x/sync v0.17.0
 )

@@ -5,6 +5,8 @@ import (
 	"os"
 	"strconv"
 	"time"
+
+	"github.com/joho/godotenv"
 )
 
 // Config holds all application configuration loaded from the environment.
@@ -30,7 +32,15 @@ type Config struct {
 }
 
 // Load reads configuration from environment variables and applies defaults.
+// It first loads a .env file (or the file pointed to by ENV_FILE) if one exists,
+// so values can be kept out of the shell environment during local development.
 func Load() (*Config, error) {
+	envFile := os.Getenv("ENV_FILE")
+	if envFile == "" {
+		envFile = ".env"
+	}
+	_ = godotenv.Load(envFile)
+
 	cfg := &Config{
 		Port:                  getEnv("PORT", "8080"),
 		DatabaseURL:           os.Getenv("DATABASE_URL"),

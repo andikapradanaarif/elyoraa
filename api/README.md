@@ -9,8 +9,7 @@ cd api
 cp .env.example .env
 # edit .env with your GitHub App credentials and secret
 
-make build
-./elyoraa
+make dev
 ```
 
 For local development, `make dev` runs the server directly with `go run`.
@@ -96,5 +95,6 @@ api/
 - Short-lived GitHub installation tokens are written to `ELYORAA_TOKEN_DIR` (default `/tmp/elyoraa`) and supplied to git via `GIT_ASKPASS`.
 - Per-review `XDG_CACHE_HOME` and `TMPDIR` are isolated; `HOME` and `XDG_CONFIG_HOME` must point at the Devin credentials volume.
 - Set `DATABASE_URL` to enable PostgreSQL webhook audit logging.
+- The server automatically loads `.env` at startup (or the file in `ENV_FILE`) so you do not have to export every variable to the shell.
 - Migrations live in `migration/migrations` and are applied automatically at startup.
 - Set `QUEUE_BACKEND=file` and `QUEUE_FILE_PATH` to use the BoltDB-backed queue.
