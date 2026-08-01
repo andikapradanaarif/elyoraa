@@ -15,7 +15,7 @@ go vet ./...
 go test ./...
 ```
 
-`go.mod` is pinned to `go 1.22.0` with `ghinstallation/v2.12.0` and `go-github/v66` so the `golang:1.22-alpine` builder image works. If you run `go mod tidy` with a newer Go toolchain, check that it does not bump `go` past `1.22` or re-add `go-github` v69/v88.
+`go.mod` is on `go 1.25.0` with `ghinstallation/v2.19.0`, `go-github/v88`, and `pgx/v5.9.1`. The Docker builder image is `golang:1.25-alpine`.
 
 ## Docker
 
