@@ -11,8 +11,10 @@ services:
     volumes:
       - workspace:/var/lib/elyoraa/workspace
       - devin-creds:/home/elyoraa/.config/devin
-      # Bind the host's `devin` binary and credentials into the container.
-      # Adjust the host path to wherever `devin` and `~/.config/devin` live.
+      - devin-config:/var/lib/elyoraa/devin-config
+      # Bind the host's `devin` binary into the container.
+      # Use the symlink path (e.g. /usr/local/bin/devin) rather than a
+      # version-pinned path so the mount survives host upgrades.
       - ${DEVIN_BIN_HOST_PATH:-/usr/local/bin/devin}:/usr/local/bin/devin:ro
     env_file: .env
     secrets:
@@ -27,6 +29,7 @@ services:
 volumes:
   workspace:
   devin-creds:
+  devin-config:
 
 secrets:
   github-app-private-key:

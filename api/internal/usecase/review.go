@@ -207,7 +207,7 @@ func (r *ReviewUsecase) updatePending(ctx context.Context, j *domain.Review, bod
 }
 
 func (r *ReviewUsecase) renderPrompt(j *domain.Review, prInfo *github.PRInfo) (string, error) {
-	tmpl, err := template.ParseFiles(filepath.Join(r.cfg.DevinConfigPath, "..", "prompts", "review.md"))
+	tmpl, err := template.ParseFiles(filepath.Join(r.cfg.PromptsDir, "review.md"))
 	if err != nil {
 		return "", err
 	}
@@ -251,7 +251,7 @@ func (r *ReviewUsecase) runDevin(ctx context.Context, worktree, prompt string) (
 		"--sandbox",
 		"--permission-mode", "autonomous",
 		"--model", r.cfg.DevinModel,
-		"--config", r.cfg.DevinConfigPath,
+		"--config", filepath.Join(r.cfg.DevinConfigDir, "devin-config.json"),
 		"--prompt-file", promptFile,
 	)
 	cmd.Dir = worktree
@@ -281,10 +281,11 @@ func (r *ReviewUsecase) parseOutput(out string) (*domain.Output, error) {
 	return &result, nil
 }
 
-// WriteDevinConfig writes a locked /app/devin-config.json. It omits the mem0 MCP
-// server unless MEM0_API_KEY is set.
-func WriteDevinConfig(path string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+// WriteDevinConfig writes a locked devin-config.json inside dir. It omits the
+// mem0 MCP server unless MEM0_API_KEY is set. Using a directory instead of a
+// single file path makes bind-mounts safe against atomic rename-writes.
+func WriteDevinConfig(dir string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
 
@@ -328,5 +329,5 @@ func WriteDevinConfig(path string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, b, 0o644)
+	return os.WriteFile(filepath.Join(dir, "devin-config.json"), b, 0o644)
 }

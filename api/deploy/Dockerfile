@@ -12,7 +12,8 @@ RUN CGO_ENABLED=0 go build -o /build/elyoraa ./cmd/server && \
 # Use Debian slim because the host-provided `devin` binary is usually glibc-linked.
 FROM debian:bookworm-slim
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends git ca-certificates bubblewrap socat && \
+    apt-get install -y --no-install-recommends git ca-certificates bubblewrap socat \
+        nodejs npm curl && \
     rm -rf /var/lib/apt/lists/*
 
 # Devin CLI must be installed in the image or mounted in. This expects `devin` in PATH.
@@ -33,12 +34,15 @@ RUN mkdir -p /home/elyoraa/.config/devin/skills/pr-review
 COPY deploy/skills/pr-review/SKILL.md /home/elyoraa/.config/devin/skills/pr-review/SKILL.md
 RUN chown -R elyoraa:elyoraa /home/elyoraa
 
-# Pre-create workspace and tmp dirs.
-RUN mkdir -p /var/lib/elyoraa/workspace /tmp/elyoraa && chown -R elyoraa:elyoraa /var/lib/elyoraa /tmp/elyoraa
+# Pre-create workspace, token, devin-config, and tmp dirs.
+RUN mkdir -p /var/lib/elyoraa/workspace /var/lib/elyoraa/tokens /var/lib/elyoraa/devin-config /tmp/elyoraa && \
+    chown -R elyoraa:elyoraa /var/lib/elyoraa /tmp/elyoraa
 
 USER elyoraa
 ENV HOME=/home/elyoraa
 ENV XDG_CONFIG_HOME=/home/elyoraa/.config
 
 EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD curl -f http://localhost:${PORT:-8080}/health || exit 1
 ENTRYPOINT ["/app/entrypoint.sh"]

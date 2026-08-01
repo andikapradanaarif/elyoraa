@@ -17,8 +17,9 @@ type Config struct {
 	GitHubAppID             int64
 	GitHubAppPrivateKeyPath string
 	DevinBin                string
-	DevinConfigPath         string
+	DevinConfigDir          string
 	DevinModel              string
+	PromptsDir              string
 	BotHandle               string
 	TokenDir                string
 	WorkspaceBase           string
@@ -48,10 +49,11 @@ func Load() (*Config, error) {
 		Port:                  getEnv("PORT", "8080"),
 		DatabaseURL:           os.Getenv("DATABASE_URL"),
 		DevinBin:              getEnv("DEVIN_BIN", "devin"),
-		DevinConfigPath:       getEnv("DEVIN_CONFIG_PATH", "/app/devin-config.json"),
+		DevinConfigDir:        getEnv("DEVIN_CONFIG_DIR", "/var/lib/elyoraa/devin-config"),
 		DevinModel:            getEnv("DEVIN_MODEL", "swe-1.7"),
+		PromptsDir:            getEnv("PROMPTS_DIR", "/app/prompts"),
 		BotHandle:             getEnv("BOT_HANDLE", "elyoraa"),
-		TokenDir:              getEnv("ELYORAA_TOKEN_DIR", "/tmp/elyoraa"),
+		TokenDir:              getEnv("ELYORAA_TOKEN_DIR", "/var/lib/elyoraa/tokens"),
 		WorkspaceBase:         getEnv("WORKSPACE_BASE", "/var/lib/elyoraa/workspace"),
 		MaxConcurrentReviews:  getInt("MAX_CONCURRENT_REVIEWS", 2),
 		WorktreeTTLHours:      time.Duration(getInt("WORKTREE_TTL_HOURS", 24)) * time.Hour,

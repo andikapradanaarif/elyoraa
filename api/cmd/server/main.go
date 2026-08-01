@@ -41,7 +41,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := usecase.WriteDevinConfig(cfg.DevinConfigPath); err != nil {
+	if err := usecase.WriteDevinConfig(cfg.DevinConfigDir); err != nil {
 		slog.Warn("failed to write devin config", "error", err)
 	}
 

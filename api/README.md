@@ -98,7 +98,7 @@ api/
     remote.origin.fetch "+refs/pull/*/head:refs/remotes/origin/pr/*"
   ```
 - The `devin-config.json` is generated at startup to the path in `DEVIN_CONFIG_PATH`.
-- Short-lived GitHub installation tokens are written to `ELYORAA_TOKEN_DIR` (default `/tmp/elyoraa`) and supplied to git via `GIT_ASKPASS`.
+- Short-lived GitHub installation tokens are written to `ELYORAA_TOKEN_DIR` (default `/var/lib/elyoraa/tokens`) and supplied to git via `GIT_ASKPASS`.
 - Per-review `XDG_CACHE_HOME` and `TMPDIR` are isolated; `HOME` and `XDG_CONFIG_HOME` must point at the Devin credentials volume.
 - Set `DATABASE_URL` to enable PostgreSQL webhook audit logging.
 - The server automatically loads `.env` at startup (or the file in `ENV_FILE`) so you do not have to export every variable to the shell.
