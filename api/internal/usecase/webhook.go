@@ -16,7 +16,7 @@ import (
 	gh "github.com/andikapradanaarif/elyoraa/internal/github"
 	"github.com/andikapradanaarif/elyoraa/internal/repository"
 	"github.com/andikapradanaarif/elyoraa/internal/repository/queue"
-	"github.com/google/go-github/v66/github"
+	"github.com/google/go-github/v88/github"
 )
 
 // ErrQueueFull is returned when the queue is at capacity.

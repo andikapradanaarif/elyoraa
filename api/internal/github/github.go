@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"sort"
 	"strconv"
@@ -14,7 +15,7 @@ import (
 
 	"github.com/andikapradanaarif/elyoraa/internal/domain"
 	ghinst "github.com/bradleyfalzon/ghinstallation/v2"
-	"github.com/google/go-github/v66/github"
+	"github.com/google/go-github/v88/github"
 )
 
 // Client wraps GitHub App auth and common PR operations.
@@ -77,16 +78,17 @@ func (c *Client) installationTransport(installationID int64) *ghinst.Transport {
 func (c *Client) installationClient(ctx context.Context, installationID int64) *github.Client {
 	tr := c.installationTransport(installationID)
 	httpClient := &http.Client{Transport: tr, Timeout: 30 * time.Second}
-	var client *github.Client
+
+	opts := []github.ClientOptionsFunc{github.WithHTTPClient(httpClient)}
 	if c.baseURL != "" {
-		var err error
-		client, err = github.NewEnterpriseClient(c.baseURL, c.baseURL+"/uploads", httpClient)
-		if err != nil {
-			// Should not happen with valid URL; fall back to standard client.
-			client = github.NewClient(httpClient)
-		}
-	} else {
-		client = github.NewClient(httpClient)
+		opts = append(opts, github.WithEnterpriseURLs(c.baseURL, c.baseURL+"/uploads"))
+	}
+
+	client, err := github.NewClient(opts...)
+	if err != nil {
+		// Should not happen with valid URL; fall back to a default client.
+		slog.Error("github client", "error", err)
+		client, _ = github.NewClient()
 	}
 	return client
 }
