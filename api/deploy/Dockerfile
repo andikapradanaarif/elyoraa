@@ -43,5 +43,5 @@ ENV XDG_CONFIG_HOME=/home/elyoraa/.config
 
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD curl -f http://localhost:${PORT:-8080}/health || exit 1
+  CMD sh -c 'PORT="${PORT:-8080}"; [ -f /app/.env ] && . /app/.env 2>/dev/null; curl -f "http://localhost:${PORT:-8080}/health"' || exit 1
 ENTRYPOINT ["/app/entrypoint.sh"]
