@@ -1,0 +1,33 @@
+version: "3.8"
+
+services:
+  elyoraa:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: elyoraa
+    ports:
+      - "8080:8080"
+    volumes:
+      - workspace:/var/lib/elyoraa/workspace
+      - devin-creds:/home/elyoraa/.config/devin
+      # Bind the host's `devin` binary and credentials into the container.
+      # Adjust the host path to wherever `devin` and `~/.config/devin` live.
+      - ${DEVIN_BIN_HOST_PATH:-/usr/local/bin/devin}:/usr/local/bin/devin:ro
+    env_file: .env
+    secrets:
+      - github-app-private-key
+    tmpfs:
+      - /tmp/elyoraa
+    cap_add:
+      - SYS_ADMIN # required for bubblewrap user namespaces
+    security_opt:
+      - "seccomp:unconfined"
+
+volumes:
+  workspace:
+  devin-creds:
+
+secrets:
+  github-app-private-key:
+    file: ${GITHUB_APP_PRIVATE_KEY_SECRET:-./secrets/github-app-private-key.pem}
