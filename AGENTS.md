@@ -50,6 +50,7 @@ The codebase is organized in a Valo-style layered architecture:
 
 - `cmd/server` — Main server entrypoint.
 - `cmd/migrate` — Manual migration command.
+- `migration` — Versioned PostgreSQL migrations, imported by both commands.
 - `internal/handler` — HTTP handlers (webhook, health, metrics).
 - `internal/usecase` — Business use cases (`WebhookUsecase`, `ReviewUsecase`).
 - `internal/repository` — PostgreSQL pool and the `WebhookStore` interface.

@@ -62,8 +62,8 @@ api/
 │   ├── config/             # env config
 │   ├── handler/            # HTTP handlers (webhook, health, metrics)
 │   ├── usecase/            # business logic (webhook, review orchestration)
-│   ├── migrate/            # versioned PostgreSQL migrations
 │   ├── repository/         # PostgreSQL pool, webhook store
+├── migration/              # versioned PostgreSQL migrations
 │   ├── repository/queue/   # in-memory (default) or BoltDB file-backed worker queue
 │   ├── repository/cache/   # bare-clone cache + worktrees
 │   ├── domain/             # shared domain types (Review, WebhookEvent)
@@ -82,5 +82,5 @@ api/
 - Short-lived GitHub installation tokens are written to `ELYORAA_TOKEN_DIR` (default `/tmp/elyoraa`) and supplied to git via `GIT_ASKPASS`.
 - Per-review `XDG_CACHE_HOME` and `TMPDIR` are isolated; `HOME` and `XDG_CONFIG_HOME` must point at the Devin credentials volume.
 - Set `DATABASE_URL` to enable PostgreSQL webhook audit logging.
-- Migrations live in `internal/migrate/migrations` and are applied automatically at startup.
+- Migrations live in `migration/migrations` and are applied automatically at startup.
 - Set `QUEUE_BACKEND=file` and `QUEUE_FILE_PATH` to use the BoltDB-backed queue.

@@ -17,12 +17,12 @@ import (
 	"github.com/andikapradanaarif/elyoraa/internal/handler"
 	"github.com/andikapradanaarif/elyoraa/internal/metrics"
 	"github.com/andikapradanaarif/elyoraa/internal/middleware"
-	"github.com/andikapradanaarif/elyoraa/internal/migrate"
 	"github.com/andikapradanaarif/elyoraa/internal/repository"
 	"github.com/andikapradanaarif/elyoraa/internal/repository/cache"
 	"github.com/andikapradanaarif/elyoraa/internal/repository/queue"
 	"github.com/andikapradanaarif/elyoraa/internal/startup"
 	"github.com/andikapradanaarif/elyoraa/internal/usecase"
+	"github.com/andikapradanaarif/elyoraa/migration"
 )
 
 func main() {
@@ -71,7 +71,7 @@ func main() {
 		os.Exit(1)
 	}
 	if db != nil {
-		if err := migrate.New(db).Up(ctx); err != nil {
+		if err := migration.New(db).Up(ctx); err != nil {
 			fmt.Fprintf(os.Stderr, "migrate: %v\n", err)
 			os.Exit(1)
 		}

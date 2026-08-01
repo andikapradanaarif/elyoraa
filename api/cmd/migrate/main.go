@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/andikapradanaarif/elyoraa/internal/migrate"
+	"github.com/andikapradanaarif/elyoraa/migration"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -24,7 +24,7 @@ func main() {
 	}
 	defer pool.Close()
 
-	m := migrate.New(pool)
+	m := migration.New(pool)
 	if err := m.Up(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "migrate up: %v\n", err)
 		os.Exit(1)
