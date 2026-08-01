@@ -14,21 +14,30 @@ type Processor interface {
 	Process(ctx context.Context, job job.Review) error
 }
 
-// Queue is a simple in-memory buffered job queue.
+// ProcessorFunc adapts a function to Processor.
+type ProcessorFunc func(ctx context.Context, job job.Review) error
+
+func (f ProcessorFunc) Process(ctx context.Context, job job.Review) error {
+	return f(ctx, job)
+}
+
+// Queue dispatches review jobs to a pool of workers backed by a Backend.
 type Queue struct {
-	jobs      chan job.Review
+	backend   Backend
 	workers   int
 	processor Processor
 	metrics   *metrics.Registry
 }
 
-// New creates a queue with the given worker count and buffer capacity.
+// New creates a queue with an in-memory backend.
 func New(workers int, p Processor, m *metrics.Registry, capacity int) *Queue {
-	if capacity <= 0 {
-		capacity = 64
-	}
+	return NewWithBackend(workers, p, m, NewMemoryBackend(capacity))
+}
+
+// NewWithBackend creates a queue with the supplied backend.
+func NewWithBackend(workers int, p Processor, m *metrics.Registry, b Backend) *Queue {
 	return &Queue{
-		jobs:      make(chan job.Review, capacity),
+		backend:   b,
 		workers:   workers,
 		processor: p,
 		metrics:   m,
@@ -37,16 +46,16 @@ func New(workers int, p Processor, m *metrics.Registry, capacity int) *Queue {
 
 // Submit enqueues a job. Returns false if the queue is full and the job is dropped.
 func (q *Queue) Submit(ctx context.Context, j job.Review) bool {
-	select {
-	case q.jobs <- j:
-		q.metrics.IncQueueDepth()
-		return true
-	case <-ctx.Done():
-		return false
-	default:
-		q.metrics.IncDroppedJobs()
+	if !q.backend.Put(ctx, j) {
+		if q.metrics != nil {
+			q.metrics.IncDroppedJobs()
+		}
 		return false
 	}
+	if q.metrics != nil {
+		q.metrics.IncQueueDepth()
+	}
+	return true
 }
 
 // Start launches the worker pool. It blocks until the context is cancelled.
@@ -55,26 +64,39 @@ func (q *Queue) Start(ctx context.Context) {
 		go q.worker(ctx, i)
 	}
 	<-ctx.Done()
-	close(q.jobs)
+	_ = q.backend.Close()
 }
 
 func (q *Queue) worker(ctx context.Context, id int) {
-	for j := range q.jobs {
-		q.metrics.DecQueueDepth()
-		q.metrics.IncActiveReviews()
+	for {
+		j, ok := q.backend.Next(ctx)
+		if !ok {
+			return
+		}
+		if q.metrics != nil {
+			q.metrics.DecQueueDepth()
+			q.metrics.IncActiveReviews()
+		}
 
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
 					slog.Error("worker panic recovered", "worker", id, "job", j.JobKey, "panic", fmt.Sprintf("%v", r))
-					q.metrics.IncReviewErrors()
+					if q.metrics != nil {
+						q.metrics.IncReviewErrors()
+					}
 				}
-				q.metrics.DecActiveReviews()
+				if q.metrics != nil {
+					q.metrics.DecActiveReviews()
+				}
+				q.backend.MarkDone(ctx, j)
 			}()
 
 			if err := q.processor.Process(ctx, j); err != nil {
 				slog.Error("review failed", "worker", id, "job", j.JobKey, "error", err)
-				q.metrics.IncReviewErrors()
+				if q.metrics != nil {
+					q.metrics.IncReviewErrors()
+				}
 			}
 		}()
 	}

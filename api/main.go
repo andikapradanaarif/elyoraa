@@ -55,7 +55,12 @@ func main() {
 	d := dedup.New()
 	m := metrics.New()
 	r := reviewer.New(cfg, c, ghClient, d)
-	q := queue.New(cfg.MaxConcurrentReviews, r, m, 64)
+	qBackend, err := newQueueBackend(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "queue backend: %v\n", err)
+		os.Exit(1)
+	}
+	q := queue.NewWithBackend(cfg.MaxConcurrentReviews, r, m, qBackend)
 	wh := webhook.New(cfg, ghClient, q, d)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -94,6 +99,17 @@ func main() {
 	defer shutdownCancel()
 	_ = srv.Shutdown(shutdownCtx)
 	cancel()
+}
+
+func newQueueBackend(cfg *config.Config) (queue.Backend, error) {
+	switch cfg.QueueBackend {
+	case "file", "boltdb":
+		return queue.OpenBoltDB(cfg.QueueFilePath, 0)
+	case "memory", "":
+		return queue.NewMemoryBackend(64), nil
+	default:
+		return nil, fmt.Errorf("unknown queue backend: %s", cfg.QueueBackend)
+	}
 }
 
 func initLogging(level string) {
