@@ -2,7 +2,7 @@ package webhook
 
 import (
 	"context"
-	"fmt"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
@@ -14,6 +14,7 @@ import (
 	gh "github.com/andikapradanaarif/elyoraa/internal/github"
 	"github.com/andikapradanaarif/elyoraa/internal/job"
 	"github.com/andikapradanaarif/elyoraa/internal/queue"
+	"github.com/andikapradanaarif/elyoraa/internal/startup"
 	"github.com/google/go-github/v66/github"
 )
 
@@ -31,9 +32,9 @@ func New(cfg *config.Config, client *gh.Client, q *queue.Queue, d *dedup.Dedup) 
 }
 
 // Register adds the webhook and health/metrics routes to the given mux.
-func (h *Handler) Register(mux *http.ServeMux, health http.HandlerFunc, metrics http.HandlerFunc) {
+func (h *Handler) Register(mux *http.ServeMux, metrics http.HandlerFunc) {
 	mux.HandleFunc("/webhook", h.ServeHTTP)
-	mux.HandleFunc("/health", health)
+	mux.HandleFunc("/health", h.Health)
 	mux.HandleFunc(h.cfg.MetricsPath, metrics)
 }
 
@@ -170,8 +171,16 @@ func isBot(j *job.Review) bool {
 		lower == "dependabot[bot]"
 }
 
-// Health is a simple liveness handler.
-func Health(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/plain")
-	fmt.Fprintln(w, "ok")
+// Health runs startup checks and reports readiness.
+func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
+	results := startup.Check(h.cfg)
+	w.Header().Set("Content-Type", "application/json")
+	if startup.HasFailures(results) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	} else {
+		w.WriteHeader(http.StatusOK)
+	}
+	if err := json.NewEncoder(w).Encode(results); err != nil {
+		slog.Error("health encode", "error", err)
+	}
 }

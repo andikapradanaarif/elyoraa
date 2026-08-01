@@ -19,6 +19,7 @@ import (
 	"github.com/andikapradanaarif/elyoraa/internal/middleware"
 	"github.com/andikapradanaarif/elyoraa/internal/queue"
 	"github.com/andikapradanaarif/elyoraa/internal/reviewer"
+	"github.com/andikapradanaarif/elyoraa/internal/startup"
 	"github.com/andikapradanaarif/elyoraa/internal/webhook"
 )
 
@@ -30,6 +31,14 @@ func main() {
 	}
 
 	initLogging(cfg.LogLevel)
+
+	checks := startup.Check(cfg)
+	startup.LogResults(checks)
+	if startup.HasFailures(checks) {
+		// Don't fail hard in case Devin is mounted in later (e.g., inside a container).
+		// The /health endpoint will report the failure instead.
+		slog.Warn("one or more startup checks failed; see /health for details")
+	}
 
 	if err := reviewer.WriteDevinConfig(cfg.DevinConfigPath); err != nil {
 		slog.Warn("failed to write devin config", "error", err)
@@ -71,7 +80,7 @@ func main() {
 	go runEvictor(ctx, c, cfg.WorkspaceDiskBudgetGB)
 
 	mux := http.NewServeMux()
-	wh.Register(mux, webhook.Health, m.Handler)
+	wh.Register(mux, m.Handler)
 	handler := middleware.RequestID(mux)
 
 	srv := &http.Server{
@@ -89,7 +98,12 @@ func main() {
 		}
 	}()
 
-	slog.Info("elyoraa started", "addr", srv.Addr, "concurrent", cfg.MaxConcurrentReviews)
+	slog.Info("elyoraa started",
+		"addr", srv.Addr,
+		"concurrent", cfg.MaxConcurrentReviews,
+		"queue_backend", cfg.QueueBackend,
+		"queue_file", cfg.QueueFilePath,
+	)
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
