@@ -96,5 +96,6 @@ api/
 - Per-review `XDG_CACHE_HOME` and `TMPDIR` are isolated; `HOME` and `XDG_CONFIG_HOME` must point at the Devin credentials volume.
 - Set `DATABASE_URL` to enable PostgreSQL webhook audit logging.
 - The server automatically loads `.env` at startup (or the file in `ENV_FILE`) so you do not have to export every variable to the shell.
+- The server fails fast at startup if `git`, `devin`, the GitHub App private key, or `WORKSPACE_BASE` are missing or misconfigured.
 - Migrations live in `migration/migrations` and are applied automatically at startup.
 - Set `QUEUE_BACKEND=file` and `QUEUE_FILE_PATH` to use the BoltDB-backed queue.

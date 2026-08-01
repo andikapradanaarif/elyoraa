@@ -37,9 +37,8 @@ func main() {
 	checks := startup.Check(cfg)
 	startup.LogResults(checks)
 	if startup.HasFailures(checks) {
-		// Don't fail hard in case Devin is mounted in later (e.g., inside a container).
-		// The /health endpoint will report the failure instead.
-		slog.Warn("one or more startup checks failed; see /health for details")
+		fmt.Fprintln(os.Stderr, "startup checks failed; fix the issues above or set the missing dependencies")
+		os.Exit(1)
 	}
 
 	if err := usecase.WriteDevinConfig(cfg.DevinConfigPath); err != nil {

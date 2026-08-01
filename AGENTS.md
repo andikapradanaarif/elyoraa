@@ -41,6 +41,8 @@ The image is Debian-based because a host-provided `devin` binary is usually glib
 
 `api/.env` is loaded automatically by `internal/config.Load` (valo-style), so `make dev` works as soon as you fill in `.env`. Set `ENV_FILE` to use a different env file.
 
+`make dev` fails fast if `git`, `devin`, the GitHub App private key, or `WORKSPACE_BASE` are missing or misconfigured.
+
 ## Notes
 
 - The server needs `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_WEBHOOK_SECRET`, `DEVIN_BIN`, `WORKSPACE_BASE`, and `DEVIN_CONFIG_PATH`.
