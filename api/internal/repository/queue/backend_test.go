@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/andikapradanaarif/elyoraa/internal/job"
+	"github.com/andikapradanaarif/elyoraa/internal/domain"
 )
 
 func testBackend(t *testing.T, b Backend) {
@@ -16,8 +16,8 @@ func testBackend(t *testing.T, b Backend) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	j1 := job.Review{JobKey: "1", Owner: "o", Repo: "r", PRNumber: 1, HeadSHA: "a"}
-	j2 := job.Review{JobKey: "2", Owner: "o", Repo: "r", PRNumber: 2, HeadSHA: "b"}
+	j1 := domain.Review{JobKey: "1", Owner: "o", Repo: "r", PRNumber: 1, HeadSHA: "a"}
+	j2 := domain.Review{JobKey: "2", Owner: "o", Repo: "r", PRNumber: 2, HeadSHA: "b"}
 
 	if !b.Put(ctx, j1) {
 		t.Fatal("Put j1 failed")
@@ -68,7 +68,7 @@ func TestBoltDBBackend(t *testing.T) {
 	defer cancel()
 
 	// Put a new job after reopen.
-	j3 := job.Review{JobKey: "3", Owner: "o", Repo: "r", PRNumber: 3, HeadSHA: "c"}
+	j3 := domain.Review{JobKey: "3", Owner: "o", Repo: "r", PRNumber: 3, HeadSHA: "c"}
 	if !b.Put(ctx, j3) {
 		t.Fatal("Put j3 failed")
 	}
@@ -87,10 +87,10 @@ func TestBoltDBBackendMaxSize(t *testing.T) {
 	defer b.Close()
 
 	ctx := context.Background()
-	if !b.Put(ctx, job.Review{JobKey: "1"}) {
+	if !b.Put(ctx, domain.Review{JobKey: "1"}) {
 		t.Fatal("Put 1 failed")
 	}
-	if b.Put(ctx, job.Review{JobKey: "2"}) {
+	if b.Put(ctx, domain.Review{JobKey: "2"}) {
 		t.Fatal("Put 2 should have failed (queue full)")
 	}
 }
@@ -119,7 +119,7 @@ func TestQueueWithFileBackend(t *testing.T) {
 	}
 
 	var processed []string
-	q := NewWithBackend(1, ProcessorFunc(func(ctx context.Context, j job.Review) error {
+	q := NewWithBackend(1, ProcessorFunc(func(ctx context.Context, j domain.Review) error {
 		processed = append(processed, j.JobKey)
 		return nil
 	}), nil, b)
@@ -127,8 +127,8 @@ func TestQueueWithFileBackend(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	go q.Start(ctx)
 
-	q.Submit(ctx, job.Review{JobKey: "a"})
-	q.Submit(ctx, job.Review{JobKey: "b"})
+	q.Submit(ctx, domain.Review{JobKey: "a"})
+	q.Submit(ctx, domain.Review{JobKey: "b"})
 
 	// Give workers time to process.
 	time.Sleep(200 * time.Millisecond)

@@ -10,17 +10,17 @@ import (
 	"sync"
 	"time"
 
-	"github.com/andikapradanaarif/elyoraa/internal/job"
+	"github.com/andikapradanaarif/elyoraa/internal/domain"
 	bolt "go.etcd.io/bbolt"
 )
 
 const (
-	metaBucket   = "meta"
-	jobsBucket   = "jobs"
-	doneBucket   = "done"
-	tailKey      = "tail"
-	headKey      = "head"
-	maxIDKeyLen  = 20
+	metaBucket  = "meta"
+	jobsBucket  = "jobs"
+	doneBucket  = "done"
+	tailKey     = "tail"
+	headKey     = "head"
+	maxIDKeyLen = 20
 )
 
 // BoltDBBackend is a file-backed durable queue using BoltDB.
@@ -91,7 +91,7 @@ func OpenBoltDB(path string, maxSize int) (*BoltDBBackend, error) {
 	return b, nil
 }
 
-func (b *BoltDBBackend) Put(ctx context.Context, j job.Review) bool {
+func (b *BoltDBBackend) Put(ctx context.Context, j domain.Review) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -137,21 +137,21 @@ func (b *BoltDBBackend) Put(ctx context.Context, j job.Review) bool {
 	return true
 }
 
-func (b *BoltDBBackend) Next(ctx context.Context) (job.Review, bool) {
+func (b *BoltDBBackend) Next(ctx context.Context) (domain.Review, bool) {
 	for {
 		select {
 		case <-ctx.Done():
-			return job.Review{}, false
+			return domain.Review{}, false
 		default:
 		}
 
 		b.mu.Lock()
 		if b.closed {
 			b.mu.Unlock()
-			return job.Review{}, false
+			return domain.Review{}, false
 		}
 
-		var j job.Review
+		var j domain.Review
 		var ok bool
 		err := b.db.Update(func(tx *bolt.Tx) error {
 			bkt := tx.Bucket([]byte(jobsBucket))
@@ -186,13 +186,13 @@ func (b *BoltDBBackend) Next(ctx context.Context) (job.Review, bool) {
 		// Wait for a new job or context cancellation.
 		select {
 		case <-ctx.Done():
-			return job.Review{}, false
+			return domain.Review{}, false
 		case <-b.notEmpty:
 		}
 	}
 }
 
-func (b *BoltDBBackend) MarkDone(ctx context.Context, j job.Review) {
+func (b *BoltDBBackend) MarkDone(ctx context.Context, j domain.Review) {
 	// The job is already removed from the pending queue by Next.
 }
 

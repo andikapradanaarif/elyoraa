@@ -1,4 +1,4 @@
-package reviewer
+package usecase
 
 import (
 	"bytes"
@@ -14,36 +14,55 @@ import (
 	"text/template"
 	"time"
 
-	"github.com/andikapradanaarif/elyoraa/internal/cache"
 	"github.com/andikapradanaarif/elyoraa/internal/config"
 	"github.com/andikapradanaarif/elyoraa/internal/dedup"
+	"github.com/andikapradanaarif/elyoraa/internal/domain"
 	gh "github.com/andikapradanaarif/elyoraa/internal/github"
-	"github.com/andikapradanaarif/elyoraa/internal/job"
+	"github.com/andikapradanaarif/elyoraa/internal/metrics"
+	"github.com/andikapradanaarif/elyoraa/internal/repository"
+	"github.com/andikapradanaarif/elyoraa/internal/repository/cache"
 )
 
-// Reviewer orchestrates a single PR review.
-type Reviewer struct {
-	cfg   *config.Config
-	cache *cache.Cache
-	gh    *gh.Client
-	d     *dedup.Dedup
+// ReviewUsecase orchestrates a single PR review.
+type ReviewUsecase struct {
+	cfg     *config.Config
+	cache   *cache.Cache
+	gh      *gh.Client
+	d       *dedup.Dedup
+	store   repository.WebhookStore
+	metrics *metrics.Registry
 }
 
-// New creates a Reviewer.
-func New(cfg *config.Config, c *cache.Cache, g *gh.Client, d *dedup.Dedup) *Reviewer {
-	return &Reviewer{cfg: cfg, cache: c, gh: g, d: d}
+// NewReviewUsecase creates a ReviewUsecase.
+func NewReviewUsecase(cfg *config.Config, c *cache.Cache, g *gh.Client, d *dedup.Dedup, s repository.WebhookStore, m *metrics.Registry) *ReviewUsecase {
+	return &ReviewUsecase{cfg: cfg, cache: c, gh: g, d: d, store: s, metrics: m}
 }
 
 // Process implements queue.Processor.
-func (r *Reviewer) Process(ctx context.Context, j job.Review) (err error) {
+func (r *ReviewUsecase) Process(ctx context.Context, j domain.Review) (err error) {
+	if r.store != nil && j.DeliveryID != "" {
+		_ = r.store.UpdateStatus(ctx, j.DeliveryID, "processing", "")
+	}
+
+	start := time.Now()
 	defer func() {
 		r.d.Done(j.JobKey)
+		if r.metrics != nil {
+			r.metrics.RecordDuration(time.Since(start))
+		}
 		if p := recover(); p != nil {
-			slog.Error("reviewer panic", "job", j.JobKey, "panic", p)
 			r.updatePending(ctx, &j, "Review failed due to an internal error.")
+			if r.store != nil && j.DeliveryID != "" {
+				_ = r.store.UpdateStatus(ctx, j.DeliveryID, "failed", fmt.Sprintf("panic: %v", p))
+			}
+			slog.Error("review panic", "job", j.JobKey, "panic", p)
 			panic(p)
 		}
 	}()
+
+	if r.metrics != nil {
+		r.metrics.IncReviewTotal()
+	}
 
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
@@ -51,17 +70,20 @@ func (r *Reviewer) Process(ctx context.Context, j job.Review) (err error) {
 	token, err := r.gh.InstallationToken(ctx, j.InstallationID)
 	if err != nil {
 		r.updatePending(ctx, &j, "Review failed: could not authenticate to GitHub.")
+		r.markFailed(ctx, j, "installation token")
 		return fmt.Errorf("installation token: %w", err)
 	}
 
 	if err := r.cache.Fetch(ctx, j.Owner, j.Repo, token); err != nil {
 		r.updatePending(ctx, &j, "Review failed: could not fetch repository.")
+		r.markFailed(ctx, j, "cache fetch")
 		return fmt.Errorf("cache fetch: %w", err)
 	}
 
 	worktree, cleanup, err := r.cache.AddWorktree(ctx, j.Owner, j.Repo, j.PRNumber, j.HeadSHA)
 	if err != nil {
 		r.updatePending(ctx, &j, "Review failed: could not prepare worktree.")
+		r.markFailed(ctx, j, "add worktree")
 		return fmt.Errorf("add worktree: %w", err)
 	}
 	defer cleanup()
@@ -69,17 +91,20 @@ func (r *Reviewer) Process(ctx context.Context, j job.Review) (err error) {
 	prInfo, err := r.gh.GetPR(ctx, j.InstallationID, j.Owner, j.Repo, j.PRNumber, r.cfg.MaxPatchBytes, r.cfg.MaxChangedFiles)
 	if err != nil {
 		r.updatePending(ctx, &j, "Review failed: could not fetch PR details.")
+		r.markFailed(ctx, j, "get pr")
 		return fmt.Errorf("get pr: %w", err)
 	}
 
 	if prInfo.IsDraft {
 		r.updatePending(ctx, &j, "Review skipped: draft PR.")
+		r.markStatus(ctx, j, "cancelled")
 		return nil
 	}
 
 	prompt, err := r.renderPrompt(&j, prInfo)
 	if err != nil {
 		r.updatePending(ctx, &j, "Review failed: could not render prompt.")
+		r.markFailed(ctx, j, "render prompt")
 		return fmt.Errorf("render prompt: %w", err)
 	}
 
@@ -87,21 +112,24 @@ func (r *Reviewer) Process(ctx context.Context, j job.Review) (err error) {
 	if err != nil {
 		if ctx.Err() == context.Canceled {
 			r.updatePending(ctx, &j, "Review cancelled: a newer push replaced this one.")
+			r.markStatus(ctx, j, "cancelled")
 			return nil
 		}
 		r.updatePending(ctx, &j, "Review failed: Devin review run failed.")
+		r.markFailed(ctx, j, "run devin")
 		return fmt.Errorf("run devin: %w", err)
 	}
 
 	review, err := r.parseOutput(out)
 	if err != nil {
 		r.updatePending(ctx, &j, "Review failed: could not parse Devin output.")
+		r.markFailed(ctx, j, "parse output")
 		return fmt.Errorf("parse output: %w", err)
 	}
 
 	// Map comments to positions. Drop unmappable comments into the summary.
 	fileComments := r.gh.MapCommentsToPositions(prInfo.Files, review.Comments)
-	dropped := make([]job.Comment, 0)
+	dropped := make([]domain.Comment, 0)
 	used := make(map[string]bool)
 	for _, c := range review.Comments {
 		k := fmt.Sprintf("%s:%d", c.Path, c.Line)
@@ -129,6 +157,7 @@ func (r *Reviewer) Process(ctx context.Context, j job.Review) (err error) {
 
 	if err := r.gh.PostReview(ctx, j.InstallationID, j.Owner, j.Repo, j.PRNumber, summary, fileComments, j.HeadSHA); err != nil {
 		r.updatePending(ctx, &j, "Review failed: could not post review comments.")
+		r.markFailed(ctx, j, "post review")
 		return fmt.Errorf("post review: %w", err)
 	}
 
@@ -136,10 +165,23 @@ func (r *Reviewer) Process(ctx context.Context, j job.Review) (err error) {
 		_ = r.gh.DeleteComment(ctx, j.InstallationID, j.Owner, j.Repo, j.PendingCommentID)
 	}
 
+	r.markStatus(ctx, j, "completed")
 	return nil
 }
 
-func (r *Reviewer) updatePending(ctx context.Context, j *job.Review, body string) {
+func (r *ReviewUsecase) markFailed(ctx context.Context, j domain.Review, msg string) {
+	if r.store != nil && j.DeliveryID != "" {
+		_ = r.store.UpdateStatus(ctx, j.DeliveryID, "failed", msg)
+	}
+}
+
+func (r *ReviewUsecase) markStatus(ctx context.Context, j domain.Review, status string) {
+	if r.store != nil && j.DeliveryID != "" {
+		_ = r.store.UpdateStatus(ctx, j.DeliveryID, status, "")
+	}
+}
+
+func (r *ReviewUsecase) updatePending(ctx context.Context, j *domain.Review, body string) {
 	if j.PendingCommentID == 0 {
 		return
 	}
@@ -149,7 +191,7 @@ func (r *Reviewer) updatePending(ctx context.Context, j *job.Review, body string
 	_ = r.gh.EditComment(ctx2, j.InstallationID, j.Owner, j.Repo, j.PendingCommentID, body)
 }
 
-func (r *Reviewer) renderPrompt(j *job.Review, prInfo *gh.PRInfo) (string, error) {
+func (r *ReviewUsecase) renderPrompt(j *domain.Review, prInfo *gh.PRInfo) (string, error) {
 	tmpl, err := template.ParseFiles(filepath.Join(r.cfg.DevinConfigPath, "..", "prompts", "review.md"))
 	if err != nil {
 		return "", err
@@ -178,7 +220,7 @@ func (r *Reviewer) renderPrompt(j *job.Review, prInfo *gh.PRInfo) (string, error
 	return buf.String(), nil
 }
 
-func (r *Reviewer) runDevin(ctx context.Context, worktree, prompt string) (string, error) {
+func (r *ReviewUsecase) runDevin(ctx context.Context, worktree, prompt string) (string, error) {
 	tmpDir, err := os.MkdirTemp("", "elyoraa-review-*")
 	if err != nil {
 		return "", err
@@ -210,15 +252,15 @@ func (r *Reviewer) runDevin(ctx context.Context, worktree, prompt string) (strin
 
 var jsonBlockRegex = regexp.MustCompile("(?s)```json\\s*(.*?)\\s*```")
 
-func (r *Reviewer) parseOutput(out string) (*job.Output, error) {
+func (r *ReviewUsecase) parseOutput(out string) (*domain.Output, error) {
 	matches := jsonBlockRegex.FindAllStringSubmatch(out, -1)
 	if len(matches) == 0 {
-		return &job.Output{Summary: strings.TrimSpace(out), Comments: nil}, nil
+		return &domain.Output{Summary: strings.TrimSpace(out), Comments: nil}, nil
 	}
 	last := matches[len(matches)-1][1]
-	var result job.Output
+	var result domain.Output
 	if err := json.Unmarshal([]byte(last), &result); err != nil {
-		return &job.Output{Summary: strings.TrimSpace(out), Comments: nil}, nil
+		return &domain.Output{Summary: strings.TrimSpace(out), Comments: nil}, nil
 	}
 	return &result, nil
 }

@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/andikapradanaarif/elyoraa/internal/job"
+	"github.com/andikapradanaarif/elyoraa/internal/domain"
 	ghinst "github.com/bradleyfalzon/ghinstallation/v2"
 	"github.com/google/go-github/v66/github"
 )
@@ -256,7 +256,7 @@ func (c *Client) DeleteComment(ctx context.Context, installationID int64, owner,
 }
 
 // MapCommentsToPositions maps review comments (path+new line) to GitHub diff positions.
-func (c *Client) MapCommentsToPositions(files []*FileInfo, comments []job.Comment) []FileComment {
+func (c *Client) MapCommentsToPositions(files []*FileInfo, comments []domain.Comment) []FileComment {
 	positions := buildPositionMap(files)
 	out := make([]FileComment, 0, len(comments))
 	for _, cm := range comments {

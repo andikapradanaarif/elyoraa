@@ -5,19 +5,19 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/andikapradanaarif/elyoraa/internal/job"
+	"github.com/andikapradanaarif/elyoraa/internal/domain"
 	"github.com/andikapradanaarif/elyoraa/internal/metrics"
 )
 
 // Processor handles a single review job.
 type Processor interface {
-	Process(ctx context.Context, job job.Review) error
+	Process(ctx context.Context, job domain.Review) error
 }
 
 // ProcessorFunc adapts a function to Processor.
-type ProcessorFunc func(ctx context.Context, job job.Review) error
+type ProcessorFunc func(ctx context.Context, job domain.Review) error
 
-func (f ProcessorFunc) Process(ctx context.Context, job job.Review) error {
+func (f ProcessorFunc) Process(ctx context.Context, job domain.Review) error {
 	return f(ctx, job)
 }
 
@@ -45,7 +45,7 @@ func NewWithBackend(workers int, p Processor, m *metrics.Registry, b Backend) *Q
 }
 
 // Submit enqueues a job. Returns false if the queue is full and the job is dropped.
-func (q *Queue) Submit(ctx context.Context, j job.Review) bool {
+func (q *Queue) Submit(ctx context.Context, j domain.Review) bool {
 	if !q.backend.Put(ctx, j) {
 		if q.metrics != nil {
 			q.metrics.IncDroppedJobs()

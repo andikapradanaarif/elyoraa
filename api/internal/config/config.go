@@ -10,6 +10,7 @@ import (
 // Config holds all application configuration loaded from the environment.
 type Config struct {
 	Port                    string
+	DatabaseURL             string
 	GitHubWebhookSecret     string
 	GitHubAppID             int64
 	GitHubAppPrivateKeyPath string
@@ -32,6 +33,7 @@ type Config struct {
 func Load() (*Config, error) {
 	cfg := &Config{
 		Port:                  getEnv("PORT", "8080"),
+		DatabaseURL:           os.Getenv("DATABASE_URL"),
 		DevinBin:              getEnv("DEVIN_BIN", "devin"),
 		DevinConfigPath:       getEnv("DEVIN_CONFIG_PATH", "/app/devin-config.json"),
 		WorkspaceBase:         getEnv("WORKSPACE_BASE", "/var/lib/elyoraa/workspace"),

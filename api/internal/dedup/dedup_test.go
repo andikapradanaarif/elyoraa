@@ -5,12 +5,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/andikapradanaarif/elyoraa/internal/job"
+	"github.com/andikapradanaarif/elyoraa/internal/domain"
 )
 
 func TestDedup(t *testing.T) {
 	d := New()
-	j1 := job.Review{Owner: "o", Repo: "r", PRNumber: 1, HeadSHA: "abc123", JobKey: JobKey("o", "r", 1, "abc123")}
+	j1 := domain.Review{Owner: "o", Repo: "r", PRNumber: 1, HeadSHA: "abc123", JobKey: JobKey("o", "r", 1, "abc123")}
 
 	ctx1, _, ok := d.TryStart(context.Background(), j1)
 	if !ok {
@@ -22,7 +22,7 @@ func TestDedup(t *testing.T) {
 		t.Fatalf("duplicate TryStart should fail")
 	}
 
-	j2 := job.Review{Owner: "o", Repo: "r", PRNumber: 1, HeadSHA: "def456", JobKey: JobKey("o", "r", 1, "def456"), PendingCommentID: 42}
+	j2 := domain.Review{Owner: "o", Repo: "r", PRNumber: 1, HeadSHA: "def456", JobKey: JobKey("o", "r", 1, "def456"), PendingCommentID: 42}
 	_, got, ok := d.TryStart(context.Background(), j2)
 	if !ok {
 		t.Fatalf("replacement TryStart should succeed")

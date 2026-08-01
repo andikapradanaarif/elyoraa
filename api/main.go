@@ -11,16 +11,17 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/andikapradanaarif/elyoraa/internal/cache"
 	"github.com/andikapradanaarif/elyoraa/internal/config"
 	"github.com/andikapradanaarif/elyoraa/internal/dedup"
 	gh "github.com/andikapradanaarif/elyoraa/internal/github"
+	"github.com/andikapradanaarif/elyoraa/internal/handler"
 	"github.com/andikapradanaarif/elyoraa/internal/metrics"
 	"github.com/andikapradanaarif/elyoraa/internal/middleware"
-	"github.com/andikapradanaarif/elyoraa/internal/queue"
-	"github.com/andikapradanaarif/elyoraa/internal/reviewer"
+	"github.com/andikapradanaarif/elyoraa/internal/repository"
+	"github.com/andikapradanaarif/elyoraa/internal/repository/cache"
+	"github.com/andikapradanaarif/elyoraa/internal/repository/queue"
 	"github.com/andikapradanaarif/elyoraa/internal/startup"
-	"github.com/andikapradanaarif/elyoraa/internal/webhook"
+	"github.com/andikapradanaarif/elyoraa/internal/usecase"
 )
 
 func main() {
@@ -40,7 +41,7 @@ func main() {
 		slog.Warn("one or more startup checks failed; see /health for details")
 	}
 
-	if err := reviewer.WriteDevinConfig(cfg.DevinConfigPath); err != nil {
+	if err := usecase.WriteDevinConfig(cfg.DevinConfigPath); err != nil {
 		slog.Warn("failed to write devin config", "error", err)
 	}
 
@@ -60,27 +61,45 @@ func main() {
 		tokenDir = "/tmp/elyoraa"
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	db, err := repository.NewDB(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "database: %v\n", err)
+		os.Exit(1)
+	}
+	if db != nil {
+		if err := repository.Migrate(ctx, db); err != nil {
+			fmt.Fprintf(os.Stderr, "migrate: %v\n", err)
+			os.Exit(1)
+		}
+		defer db.Close()
+	}
+
 	c := cache.New(cfg.WorkspaceBase, "/app/git-askpass.sh", tokenDir)
 	d := dedup.New()
 	m := metrics.New()
-	r := reviewer.New(cfg, c, ghClient, d)
+	store := repository.NewWebhookStore(db)
+
 	qBackend, err := newQueueBackend(cfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "queue backend: %v\n", err)
 		os.Exit(1)
 	}
-	q := queue.NewWithBackend(cfg.MaxConcurrentReviews, r, m, qBackend)
-	wh := webhook.New(cfg, ghClient, q, d)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	reviewUC := usecase.NewReviewUsecase(cfg, c, ghClient, d, store, m)
+	q := queue.NewWithBackend(cfg.MaxConcurrentReviews, reviewUC, m, qBackend)
+
+	webhookUC := usecase.NewWebhookUsecase(cfg, ghClient, d, q, store)
+	h := handler.New(cfg, webhookUC, m)
 
 	go q.Start(ctx)
 	go runSweeper(ctx, c, cfg.WorktreeTTLHours)
 	go runEvictor(ctx, c, cfg.WorkspaceDiskBudgetGB)
 
 	mux := http.NewServeMux()
-	wh.Register(mux, m.Handler)
+	h.Register(mux)
 	handler := middleware.RequestID(mux)
 
 	srv := &http.Server{
@@ -103,6 +122,7 @@ func main() {
 		"concurrent", cfg.MaxConcurrentReviews,
 		"queue_backend", cfg.QueueBackend,
 		"queue_file", cfg.QueueFilePath,
+		"database", cfg.DatabaseURL != "",
 	)
 
 	sig := make(chan os.Signal, 1)

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/andikapradanaarif/elyoraa/internal/job"
+	"github.com/andikapradanaarif/elyoraa/internal/domain"
 )
 
 // Dedup tracks in-flight review jobs and handles cancel-and-replace.
@@ -16,7 +16,7 @@ type Dedup struct {
 }
 
 type state struct {
-	job    *job.Review
+	job    *domain.Review
 	cancel context.CancelFunc
 }
 
@@ -29,7 +29,7 @@ func New() *Dedup {
 // If a job with the same key is already running, it returns false (skip).
 // If a job for the same PR but a different SHA is running, it cancels the old one and copies the
 // pending comment ID to the new job.
-func (d *Dedup) TryStart(parent context.Context, j job.Review) (context.Context, *job.Review, bool) {
+func (d *Dedup) TryStart(parent context.Context, j domain.Review) (context.Context, *domain.Review, bool) {
 	prKey := fmt.Sprintf("%s/%s/%d", j.Owner, j.Repo, j.PRNumber)
 
 	d.mu.Lock()

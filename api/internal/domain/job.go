@@ -1,4 +1,4 @@
-package job
+package domain
 
 import (
 	"strings"
@@ -8,6 +8,7 @@ import (
 // Review represents a PR review job.
 type Review struct {
 	JobKey           string
+	DeliveryID       string
 	Owner            string
 	Repo             string
 	PRNumber         int
