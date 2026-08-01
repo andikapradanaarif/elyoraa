@@ -50,7 +50,7 @@ api/
 │   ├── github/             # GitHub App auth, PR fetch, review posting
 │   ├── cache/              # bare-clone cache + worktrees
 │   ├── dedup/              # in-flight job deduplication
-│   ├── queue/              # in-memory worker queue
+│   ├── queue/              # in-memory (default) or BoltDB file-backed worker queue
 │   ├── webhook/            # HTTP handler
 │   ├── reviewer/           # Devin prompt/review orchestrator
 │   └── metrics/            # Prometheus text metrics
@@ -63,3 +63,4 @@ api/
 - The `devin-config.json` is generated at startup to the path in `DEVIN_CONFIG_PATH`.
 - Short-lived GitHub installation tokens are written to `ELYORAA_TOKEN_DIR` (default `/tmp/elyoraa`) and supplied to git via `GIT_ASKPASS`.
 - Per-review `XDG_CACHE_HOME` and `TMPDIR` are isolated; `HOME` and `XDG_CONFIG_HOME` must point at the Devin credentials volume.
+- Set `QUEUE_BACKEND=file` and `QUEUE_FILE_PATH` to use the BoltDB-backed queue.

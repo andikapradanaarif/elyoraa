@@ -33,4 +33,5 @@ The image is Debian-based because a host-provided `devin` binary is usually glib
 ## Notes
 
 - The server needs `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_WEBHOOK_SECRET`, `DEVIN_BIN`, `WORKSPACE_BASE`, and `DEVIN_CONFIG_PATH`.
-- Phase 1.5/2 (file-backed/Redis queue) and the Devin auth spike are not yet implemented.
+- Set `QUEUE_BACKEND=file` and `QUEUE_FILE_PATH` to use the BoltDB-backed queue.
+- The Devin auth spike is not yet implemented.
