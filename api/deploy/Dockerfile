@@ -5,7 +5,8 @@ WORKDIR /build
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -o /build/elyoraa .
+RUN CGO_ENABLED=0 go build -o /build/elyoraa ./cmd/server && \
+    CGO_ENABLED=0 go build -o /build/elyoraa-migrate ./cmd/migrate
 
 # Runtime stage
 # Use Debian slim because the host-provided `devin` binary is usually glibc-linked.
@@ -21,6 +22,7 @@ RUN useradd -m -s /bin/sh elyoraa
 
 WORKDIR /app
 COPY --from=builder /build/elyoraa /app/elyoraa
+COPY --from=builder /build/elyoraa-migrate /app/elyoraa-migrate
 COPY --from=builder /build/prompts /app/prompts
 COPY deploy/git-askpass.sh /app/git-askpass.sh
 COPY deploy/entrypoint.sh /app/entrypoint.sh

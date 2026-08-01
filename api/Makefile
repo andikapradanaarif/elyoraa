@@ -8,10 +8,10 @@ BINARY_NAME=elyoraa
 .PHONY: build dev test vet coverage clean lint format deps docker-build docker-up docker-down deploy-ghcr help
 
 build:
-	$(GOBUILD) -o $(BINARY_NAME) .
+	$(GOBUILD) -o $(BINARY_NAME) ./cmd/server
 
 dev:
-	$(GOCMD) run main.go
+	$(GOCMD) run ./cmd/server
 
 test:
 	$(GOTEST) ./...

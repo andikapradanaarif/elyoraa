@@ -9,7 +9,7 @@ cd api
 cp .env.example .env
 # edit .env with your GitHub App credentials and secret
 
-go build -o elyoraa .
+make build
 ./elyoraa
 ```
 
@@ -55,7 +55,9 @@ cd api
 
 ```
 api/
-├── main.go                 # entrypoint
+├── cmd/
+│   ├── server/             # main server entrypoint
+│   └── migrate/            # manual migration command
 ├── internal/
 │   ├── config/             # env config
 │   ├── handler/            # HTTP handlers (webhook, health, metrics)

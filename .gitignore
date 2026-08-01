@@ -6,6 +6,7 @@ secrets/
 
 # Go
 api/elyoraa
+api/elyoraa-migrate
 *.exe
 *.out
 *.test

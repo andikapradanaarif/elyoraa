@@ -48,9 +48,11 @@ The image is Debian-based because a host-provided `devin` binary is usually glib
 
 The codebase is organized in a Valo-style layered architecture:
 
+- `cmd/server` — Main server entrypoint.
+- `cmd/migrate` — Manual migration command.
 - `internal/handler` — HTTP handlers (webhook, health, metrics).
 - `internal/usecase` — Business use cases (`WebhookUsecase`, `ReviewUsecase`).
-- `internal/repository` — PostgreSQL pool, migrations, and the `WebhookStore` interface.
+- `internal/repository` — PostgreSQL pool and the `WebhookStore` interface.
 - `internal/repository/queue` — Queue backend implementations.
 - `internal/repository/cache` — Git bare-clone and worktree cache.
 - `internal/domain` — Shared domain types (`Review`, `WebhookEvent`).
