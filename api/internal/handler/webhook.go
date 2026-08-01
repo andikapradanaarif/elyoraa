@@ -27,7 +27,7 @@ func New(cfg *config.Config, uc *usecase.WebhookUsecase, m *metrics.Registry) *H
 
 // Register adds the webhook, health, and metrics routes to the mux.
 func (h *Handler) Register(mux *http.ServeMux) {
-	mux.HandleFunc("/webhook", h.ServeHTTP)
+	mux.HandleFunc("/webhook/gh", h.ServeHTTP)
 	mux.HandleFunc("/health", h.Health)
 	mux.HandleFunc(h.cfg.MetricsPath, h.metrics.Handler)
 }
