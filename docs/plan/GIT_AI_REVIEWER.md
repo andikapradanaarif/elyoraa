@@ -227,7 +227,7 @@ elyoraa/
 │       ├── Dockerfile           # multi-stage: golang build → runtime with devin + bwrap + socat
 │       └── docker-compose.yml   # elyoraa service + volumes (WORKSPACE_BASE, ~/.config/devin, /tmp/elyoraa)
 ├── docs/plan/
-│   └── ARCHITECTURE.md          # this document
+│   └── GIT_AI_REVIEWER.md       # this document
 ├── .gitignore
 └── README.md
 ```

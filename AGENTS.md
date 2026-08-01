@@ -3,7 +3,7 @@
 ## Project layout
 
 - Go module lives in `api/`: `github.com/andikapradanaarif/elyoraa`.
-- Architecture and plan docs live in `docs/plan/ARCHITECTURE.md`.
+- Architecture and plan docs live in `docs/plan/GIT_AI_REVIEWER.md`.
 - Deployment artifacts live in `api/deploy/`.
 
 ## Build / test

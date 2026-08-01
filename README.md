@@ -2,7 +2,7 @@
 
 AI PR Reviewer — a Go engine that receives GitHub `pull_request` webhooks and reviews each PR with the Devin CLI in a sandboxed worktree.
 
-- **Architecture:** see [`docs/plan/ARCHITECTURE.md`](docs/plan/ARCHITECTURE.md).
+- **Architecture:** see [`docs/plan/GIT_AI_REVIEWER.md`](docs/plan/GIT_AI_REVIEWER.md).
 - **Implementation:** see [`api/README.md`](api/README.md).
 - **Runbook:** copy `api/deploy/.env.example` to `api/deploy/.env`, fill in your GitHub App credentials, and run `docker compose up --build` from `api/deploy/`.
 
