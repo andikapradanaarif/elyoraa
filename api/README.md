@@ -1,6 +1,6 @@
 # elyoraa — AI PR Reviewer (API)
 
-Go webhook engine that receives GitHub `pull_request` events and reviews them using the Devin CLI in a sandboxed worktree.
+Go webhook engine that receives GitHub `pull_request` and `issue_comment` events and reviews PRs using the Devin CLI in a sandboxed worktree.
 
 ## Quick start
 
@@ -28,7 +28,7 @@ make migrate-down
 
 The server listens on `PORT` (default `8080`) and exposes:
 
-- `POST /webhook` — GitHub webhook endpoint.
+- `POST /webhook` — GitHub webhook endpoint. Listens for `pull_request` (`opened`, `reopened`, `ready_for_review`) and `issue_comment` (to request a rereview by mentioning the bot).
 - `GET /health` — liveness.
 - `GET /metrics` — Prometheus-style metrics.
 
@@ -96,6 +96,10 @@ api/
 - Per-review `XDG_CACHE_HOME` and `TMPDIR` are isolated; `HOME` and `XDG_CONFIG_HOME` must point at the Devin credentials volume.
 - Set `DATABASE_URL` to enable PostgreSQL webhook audit logging.
 - The server automatically loads `.env` at startup (or the file in `ENV_FILE`) so you do not have to export every variable to the shell.
+- `DEVIN_MODEL` (default `swe-1.7`) is passed to the `devin` CLI with `--model`.
+- `BOT_HANDLE` (default `elyoraa`) is used to detect rereview requests in comments.
+- The bot reviews open, non-draft PRs once. It does not re-review on later pushes unless the author mentions the bot (e.g., `@elyoraa rereview`).
+- If the bot finds no issues it approves the PR; otherwise it requests changes.
 - The server fails fast at startup if `git`, `devin`, the GitHub App private key, or `WORKSPACE_BASE` are missing or misconfigured.
 - Migrations live in `migration/migrations` and are applied automatically at startup.
 - Set `QUEUE_BACKEND=file` and `QUEUE_FILE_PATH` to use the BoltDB-backed queue.

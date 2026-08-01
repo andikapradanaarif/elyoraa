@@ -44,6 +44,8 @@ Here is the diff:
 - Avoid nitpicks and style-only comments.
 - Be concise.
 - Do not write or edit any files. Do not run any shell commands other than the allowed git commands.
+- You review the PR once. Do not re-review on later pushes unless the author explicitly asks you to.
+- If you find no issues, set `comments` to `[]` and give a brief positive summary so the PR can be approved.
 
 ## Output format
 

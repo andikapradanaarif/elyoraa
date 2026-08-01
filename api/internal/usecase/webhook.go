@@ -25,6 +25,9 @@ var ErrQueueFull = errors.New("queue full")
 // ErrDuplicate is returned when the same review is already in flight.
 var ErrDuplicate = errors.New("duplicate review in flight")
 
+// ErrNotForUs is returned when the webhook is not an event the bot handles.
+var ErrNotForUs = errors.New("event not handled")
+
 type contextKey string
 
 const (
@@ -62,27 +65,34 @@ func (u *WebhookUsecase) Handle(ctx context.Context, body []byte, signature stri
 	deliveryID := u.deliveryID(ctx)
 
 	if err := u.gh.VerifyWebhookSignature(body, signature, u.cfg.GitHubWebhookSecret); err != nil {
-		u.store.UpdateStatus(ctx, deliveryID, "failed", fmt.Sprintf("signature: %v", err))
+		_ = u.store.UpdateStatus(ctx, deliveryID, "failed", fmt.Sprintf("signature: %v", err))
 		return domain.Review{}, fmt.Errorf("signature: %w", err)
 	}
 
 	eventType, _ := ctx.Value(eventTypeKey).(string)
 
-	if eventType != "pull_request" {
+	switch eventType {
+	case "pull_request":
+		return u.handlePullRequest(ctx, deliveryID, body)
+	case "issue_comment":
+		return u.handleIssueComment(ctx, deliveryID, body)
+	default:
 		_ = u.store.Record(ctx, &domain.WebhookEvent{
 			DeliveryID: deliveryID,
 			EventType:  eventType,
 			Status:     "ignored",
 			ReceivedAt: time.Now(),
 		})
-		return domain.Review{}, nil
+		return domain.Review{}, ErrNotForUs
 	}
+}
 
-	event, err := go_github.ParseWebHook(eventType, body)
+func (u *WebhookUsecase) handlePullRequest(ctx context.Context, deliveryID string, body []byte) (domain.Review, error) {
+	event, err := go_github.ParseWebHook("pull_request", body)
 	if err != nil {
 		_ = u.store.Record(ctx, &domain.WebhookEvent{
 			DeliveryID: deliveryID,
-			EventType:  eventType,
+			EventType:  "pull_request",
 			Status:     "failed",
 			Error:      fmt.Sprintf("parse: %v", err),
 			ReceivedAt: time.Now(),
@@ -94,7 +104,7 @@ func (u *WebhookUsecase) Handle(ctx context.Context, body []byte, signature stri
 	if !ok {
 		_ = u.store.Record(ctx, &domain.WebhookEvent{
 			DeliveryID: deliveryID,
-			EventType:  eventType,
+			EventType:  "pull_request",
 			Status:     "ignored",
 			ReceivedAt: time.Now(),
 		})
@@ -102,26 +112,28 @@ func (u *WebhookUsecase) Handle(ctx context.Context, body []byte, signature stri
 	}
 
 	action := prEvent.GetAction()
-	if action != "opened" && action != "synchronize" && action != "reopened" {
-		_ = u.store.Record(ctx, u.webhookEvent(deliveryID, prEvent, body, "ignored", ""))
+	// Only review when a PR is opened, reopened, or marked ready for review.
+	// synchronize (new pushes) is ignored unless the author explicitly requests a rereview.
+	if action != "opened" && action != "reopened" && action != "ready_for_review" {
+		_ = u.store.Record(ctx, u.prWebhookEvent(deliveryID, prEvent, body, "ignored", ""))
 		return domain.Review{}, nil
 	}
 
 	pr := prEvent.GetPullRequest()
 	if pr.GetDraft() {
-		_ = u.store.Record(ctx, u.webhookEvent(deliveryID, prEvent, body, "ignored", ""))
+		_ = u.store.Record(ctx, u.prWebhookEvent(deliveryID, prEvent, body, "ignored", ""))
 		return domain.Review{}, nil
 	}
 
 	repo := prEvent.GetRepo()
 	if repo == nil || repo.GetFullName() == "" {
-		_ = u.store.Record(ctx, u.webhookEvent(deliveryID, prEvent, body, "failed", "missing repository"))
+		_ = u.store.Record(ctx, u.prWebhookEvent(deliveryID, prEvent, body, "failed", "missing repository"))
 		return domain.Review{}, fmt.Errorf("missing repository")
 	}
 
 	ownerRepo := strings.SplitN(repo.GetFullName(), "/", 2)
 	if len(ownerRepo) != 2 {
-		_ = u.store.Record(ctx, u.webhookEvent(deliveryID, prEvent, body, "failed", "invalid repository"))
+		_ = u.store.Record(ctx, u.prWebhookEvent(deliveryID, prEvent, body, "failed", "invalid repository"))
 		return domain.Review{}, fmt.Errorf("invalid repository")
 	}
 	owner, repoName := ownerRepo[0], ownerRepo[1]
@@ -140,18 +152,124 @@ func (u *WebhookUsecase) Handle(ctx context.Context, body []byte, signature stri
 		EnqueuedAt:     time.Now(),
 	}
 
-	if review.IsBot() {
-		_ = u.store.Record(ctx, u.webhookEvent(deliveryID, prEvent, body, "ignored", ""))
+	return u.enqueueReview(ctx, review, u.prWebhookEvent(deliveryID, prEvent, body, "received", ""))
+}
+
+func (u *WebhookUsecase) handleIssueComment(ctx context.Context, deliveryID string, body []byte) (domain.Review, error) {
+	event, err := go_github.ParseWebHook("issue_comment", body)
+	if err != nil {
+		_ = u.store.Record(ctx, &domain.WebhookEvent{
+			DeliveryID: deliveryID,
+			EventType:  "issue_comment",
+			Status:     "failed",
+			Error:      fmt.Sprintf("parse: %v", err),
+			ReceivedAt: time.Now(),
+		})
+		return domain.Review{}, fmt.Errorf("parse: %w", err)
+	}
+
+	cmEvent, ok := event.(*go_github.IssueCommentEvent)
+	if !ok {
+		_ = u.store.Record(ctx, &domain.WebhookEvent{
+			DeliveryID: deliveryID,
+			EventType:  "issue_comment",
+			Status:     "ignored",
+			ReceivedAt: time.Now(),
+		})
 		return domain.Review{}, nil
 	}
 
-	review.JobKey = dedup.JobKey(owner, repoName, review.PRNumber, review.HeadSHA)
+	action := cmEvent.GetAction()
+	if action != "created" && action != "edited" {
+		_ = u.store.Record(ctx, u.commentWebhookEvent(deliveryID, cmEvent, body, "ignored", ""))
+		return domain.Review{}, nil
+	}
 
-	_ = u.store.Record(ctx, u.webhookEvent(deliveryID, prEvent, body, "received", ""))
+	issue := cmEvent.GetIssue()
+	if issue == nil || !issue.IsPullRequest() {
+		_ = u.store.Record(ctx, u.commentWebhookEvent(deliveryID, cmEvent, body, "ignored", ""))
+		return domain.Review{}, nil
+	}
+
+	comment := cmEvent.GetComment()
+	if comment == nil || !u.isRereviewRequest(comment.GetBody()) {
+		_ = u.store.Record(ctx, u.commentWebhookEvent(deliveryID, cmEvent, body, "ignored", ""))
+		return domain.Review{}, nil
+	}
+
+	repo := cmEvent.GetRepo()
+	if repo == nil || repo.GetFullName() == "" {
+		_ = u.store.Record(ctx, u.commentWebhookEvent(deliveryID, cmEvent, body, "failed", "missing repository"))
+		return domain.Review{}, fmt.Errorf("missing repository")
+	}
+
+	ownerRepo := strings.SplitN(repo.GetFullName(), "/", 2)
+	if len(ownerRepo) != 2 {
+		_ = u.store.Record(ctx, u.commentWebhookEvent(deliveryID, cmEvent, body, "failed", "invalid repository"))
+		return domain.Review{}, fmt.Errorf("invalid repository")
+	}
+	owner, repoName := ownerRepo[0], ownerRepo[1]
+
+	prNumber := issue.GetNumber()
+	instID := cmEvent.GetInstallation().GetID()
+
+	prCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	prInfo, err := u.gh.GetPR(prCtx, instID, owner, repoName, prNumber, 0, 0)
+	cancel()
+	if err != nil {
+		_ = u.store.Record(ctx, u.commentWebhookEvent(deliveryID, cmEvent, body, "failed", fmt.Sprintf("get pr: %v", err)))
+		return domain.Review{}, fmt.Errorf("get pr: %w", err)
+	}
+
+	if prInfo.IsDraft {
+		_ = u.store.Record(ctx, u.commentWebhookEvent(deliveryID, cmEvent, body, "ignored", ""))
+		return domain.Review{}, nil
+	}
+
+	review := domain.Review{
+		DeliveryID:     deliveryID,
+		Owner:          owner,
+		Repo:           repoName,
+		PRNumber:       prNumber,
+		HeadSHA:        prInfo.HeadSHA,
+		BaseSHA:        prInfo.BaseSHA,
+		InstallationID: instID,
+		Author:         prInfo.Author,
+		Title:          prInfo.Title,
+		Body:           prInfo.Body,
+		EnqueuedAt:     time.Now(),
+	}
+
+	return u.enqueueReview(ctx, review, u.commentWebhookEvent(deliveryID, cmEvent, body, "received", ""))
+}
+
+// isRereviewRequest reports whether a comment is asking the bot to rereview a PR.
+func (u *WebhookUsecase) isRereviewRequest(body string) bool {
+	body = strings.ToLower(body)
+	handle := strings.ToLower(u.cfg.BotHandle)
+	if !strings.Contains(body, "@"+handle) && !strings.Contains(body, handle) {
+		return false
+	}
+	return strings.Contains(body, "rereview") ||
+		strings.Contains(body, "re-review") ||
+		strings.Contains(body, "review again") ||
+		strings.Contains(body, "recheck") ||
+		strings.Contains(body, "check again")
+}
+
+func (u *WebhookUsecase) enqueueReview(ctx context.Context, review domain.Review, evt *domain.WebhookEvent) (domain.Review, error) {
+	if review.IsBot() {
+		_ = u.store.Record(ctx, evt)
+		return domain.Review{}, nil
+	}
+
+	review.JobKey = dedup.JobKey(review.Owner, review.Repo, review.PRNumber, review.HeadSHA)
+
+	_ = u.store.Record(ctx, evt)
 
 	ctx, job, ok := u.d.TryStart(ctx, review)
 	if !ok {
-		_ = u.store.UpdateStatus(ctx, deliveryID, "dropped", "duplicate review in flight")
+		_ = u.store.UpdateStatus(ctx, review.DeliveryID, "dropped", "duplicate review in flight")
 		slog.Info("skipping duplicate review", "job", review.JobKey)
 		return domain.Review{}, ErrDuplicate
 	}
@@ -178,11 +296,11 @@ func (u *WebhookUsecase) Handle(ctx context.Context, body []byte, signature stri
 			cancel()
 		}
 		u.d.Done(job.JobKey)
-		_ = u.store.UpdateStatus(ctx, deliveryID, "dropped", "queue full")
+		_ = u.store.UpdateStatus(ctx, review.DeliveryID, "dropped", "queue full")
 		return *job, ErrQueueFull
 	}
 
-	_ = u.store.UpdateStatus(ctx, deliveryID, "queued", "")
+	_ = u.store.UpdateStatus(ctx, review.DeliveryID, "queued", "")
 	return *job, nil
 }
 
@@ -197,7 +315,7 @@ func (u *WebhookUsecase) deliveryID(ctx context.Context) string {
 	return "elyoraa-" + hex.EncodeToString(b)
 }
 
-func (u *WebhookUsecase) webhookEvent(deliveryID string, prEvent *go_github.PullRequestEvent, body []byte, status, errMsg string) *domain.WebhookEvent {
+func (u *WebhookUsecase) prWebhookEvent(deliveryID string, prEvent *go_github.PullRequestEvent, body []byte, status, errMsg string) *domain.WebhookEvent {
 	evt := &domain.WebhookEvent{
 		DeliveryID: deliveryID,
 		EventType:  "pull_request",
@@ -213,6 +331,26 @@ func (u *WebhookUsecase) webhookEvent(deliveryID string, prEvent *go_github.Pull
 	}
 	if pr := prEvent.GetPullRequest(); pr != nil {
 		evt.PRNumber = pr.GetNumber()
+	}
+	return evt
+}
+
+func (u *WebhookUsecase) commentWebhookEvent(deliveryID string, cmEvent *go_github.IssueCommentEvent, body []byte, status, errMsg string) *domain.WebhookEvent {
+	evt := &domain.WebhookEvent{
+		DeliveryID: deliveryID,
+		EventType:  "issue_comment",
+		Action:     cmEvent.GetAction(),
+		Payload:    body,
+		Status:     status,
+		ReceivedAt: time.Now(),
+		Error:      errMsg,
+	}
+	if repo := cmEvent.GetRepo(); repo != nil {
+		evt.Owner = repo.GetOwner().GetLogin()
+		evt.Repo = repo.GetName()
+	}
+	if issue := cmEvent.GetIssue(); issue != nil {
+		evt.PRNumber = issue.GetNumber()
 	}
 	return evt
 }

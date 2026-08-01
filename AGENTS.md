@@ -50,6 +50,14 @@ The image is Debian-based because a host-provided `devin` binary is usually glib
 - Set `QUEUE_BACKEND=file` and `QUEUE_FILE_PATH` to use the BoltDB-backed queue.
 - The Devin auth spike is not yet implemented.
 
+## Review flow
+
+- Webhook events: `pull_request` (`opened`, `reopened`, `ready_for_review`) and `issue_comment` (rereview by mention).
+- Draft PRs and `synchronize` pushes are ignored.
+- Rereview is triggered by a PR comment mentioning the bot handle (`BOT_HANDLE`, default `elyoraa`) with a rereview keyword (`rereview`, `re-review`, `review again`, `recheck`, `check again`).
+- The Devin model is configurable via `DEVIN_MODEL` (default `swe-1.7`) and passed with `--model`.
+- If the review output has no comments, the bot approves the PR; otherwise it requests changes.
+
 ## Architecture
 
 The codebase is organized in a Valo-style layered architecture:

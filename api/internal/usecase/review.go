@@ -155,7 +155,12 @@ func (r *ReviewUsecase) Process(ctx context.Context, j domain.Review) (err error
 		summary = sb.String()
 	}
 
-	if err := r.gh.PostReview(ctx, j.InstallationID, j.Owner, j.Repo, j.PRNumber, summary, fileComments, j.HeadSHA); err != nil {
+	state := "APPROVE"
+	if len(review.Comments) > 0 {
+		state = "REQUEST_CHANGES"
+	}
+
+	if err := r.gh.PostReview(ctx, j.InstallationID, j.Owner, j.Repo, j.PRNumber, summary, fileComments, j.HeadSHA, state); err != nil {
 		r.updatePending(ctx, &j, "Review failed: could not post review comments.")
 		r.markFailed(ctx, j, "post review")
 		return fmt.Errorf("post review: %w", err)
@@ -235,6 +240,7 @@ func (r *ReviewUsecase) runDevin(ctx context.Context, worktree, prompt string) (
 	cmd := exec.CommandContext(ctx, r.cfg.DevinBin,
 		"--sandbox",
 		"--permission-mode", "autonomous",
+		"--model", r.cfg.DevinModel,
 		"--config", r.cfg.DevinConfigPath,
 		"--prompt-file", promptFile,
 	)

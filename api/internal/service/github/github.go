@@ -192,7 +192,8 @@ func (c *Client) GetPR(ctx context.Context, installationID int64, owner, repo st
 }
 
 // PostReview posts a summary review with inline positional comments.
-func (c *Client) PostReview(ctx context.Context, installationID int64, owner, repo string, number int, summary string, comments []FileComment, headSHA string) error {
+// state is one of "APPROVE", "REQUEST_CHANGES", or "COMMENT".
+func (c *Client) PostReview(ctx context.Context, installationID int64, owner, repo string, number int, summary string, comments []FileComment, headSHA, state string) error {
 	client := c.installationClient(ctx, installationID)
 
 	draftComments := make([]*go_github.DraftReviewComment, 0, len(comments))
@@ -210,7 +211,7 @@ func (c *Client) PostReview(ctx context.Context, installationID int64, owner, re
 
 	_, _, err := client.PullRequests.CreateReview(ctx, owner, repo, number, &go_github.PullRequestReviewRequest{
 		Body:     go_github.String(summary),
-		Event:    go_github.String("COMMENT"),
+		Event:    go_github.String(state),
 		Comments: draftComments,
 		CommitID: go_github.String(headSHA),
 	})
