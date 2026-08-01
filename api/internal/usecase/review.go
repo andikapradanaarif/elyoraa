@@ -17,24 +17,24 @@ import (
 	"github.com/andikapradanaarif/elyoraa/internal/config"
 	"github.com/andikapradanaarif/elyoraa/internal/dedup"
 	"github.com/andikapradanaarif/elyoraa/internal/domain"
-	gh "github.com/andikapradanaarif/elyoraa/internal/github"
 	"github.com/andikapradanaarif/elyoraa/internal/metrics"
 	"github.com/andikapradanaarif/elyoraa/internal/repository"
 	"github.com/andikapradanaarif/elyoraa/internal/repository/cache"
+	"github.com/andikapradanaarif/elyoraa/internal/service/github"
 )
 
 // ReviewUsecase orchestrates a single PR review.
 type ReviewUsecase struct {
 	cfg     *config.Config
 	cache   *cache.Cache
-	gh      *gh.Client
+	gh      *github.Client
 	d       *dedup.Dedup
 	store   repository.WebhookStore
 	metrics *metrics.Registry
 }
 
 // NewReviewUsecase creates a ReviewUsecase.
-func NewReviewUsecase(cfg *config.Config, c *cache.Cache, g *gh.Client, d *dedup.Dedup, s repository.WebhookStore, m *metrics.Registry) *ReviewUsecase {
+func NewReviewUsecase(cfg *config.Config, c *cache.Cache, g *github.Client, d *dedup.Dedup, s repository.WebhookStore, m *metrics.Registry) *ReviewUsecase {
 	return &ReviewUsecase{cfg: cfg, cache: c, gh: g, d: d, store: s, metrics: m}
 }
 
@@ -191,7 +191,7 @@ func (r *ReviewUsecase) updatePending(ctx context.Context, j *domain.Review, bod
 	_ = r.gh.EditComment(ctx2, j.InstallationID, j.Owner, j.Repo, j.PendingCommentID, body)
 }
 
-func (r *ReviewUsecase) renderPrompt(j *domain.Review, prInfo *gh.PRInfo) (string, error) {
+func (r *ReviewUsecase) renderPrompt(j *domain.Review, prInfo *github.PRInfo) (string, error) {
 	tmpl, err := template.ParseFiles(filepath.Join(r.cfg.DevinConfigPath, "..", "prompts", "review.md"))
 	if err != nil {
 		return "", err

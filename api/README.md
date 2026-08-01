@@ -80,7 +80,7 @@ api/
 │   ├── repository/queue/   # in-memory (default) or BoltDB file-backed worker queue
 │   ├── repository/cache/   # bare-clone cache + worktrees
 │   ├── domain/             # shared domain types (Review, WebhookEvent)
-│   ├── github/             # GitHub App auth, PR fetch, review posting
+│   ├── service/github/     # GitHub App auth, PR fetch, review posting
 │   ├── dedup/              # in-flight job deduplication
 │   ├── metrics/            # Prometheus text metrics
 │   ├── middleware/         # request ID / access logging

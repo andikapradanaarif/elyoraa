@@ -1,4 +1,4 @@
-package gh
+package github
 
 import (
 	"context"
@@ -15,7 +15,7 @@ import (
 
 	"github.com/andikapradanaarif/elyoraa/internal/domain"
 	ghinst "github.com/bradleyfalzon/ghinstallation/v2"
-	"github.com/google/go-github/v88/github"
+	go_github "github.com/google/go-github/v88/github"
 )
 
 // Client wraps GitHub App auth and common PR operations.
@@ -75,20 +75,20 @@ func (c *Client) installationTransport(installationID int64) *ghinst.Transport {
 	return ghinst.NewFromAppsTransport(c.apps, installationID)
 }
 
-func (c *Client) installationClient(ctx context.Context, installationID int64) *github.Client {
+func (c *Client) installationClient(ctx context.Context, installationID int64) *go_github.Client {
 	tr := c.installationTransport(installationID)
 	httpClient := &http.Client{Transport: tr, Timeout: 30 * time.Second}
 
-	opts := []github.ClientOptionsFunc{github.WithHTTPClient(httpClient)}
+	opts := []go_github.ClientOptionsFunc{go_github.WithHTTPClient(httpClient)}
 	if c.baseURL != "" {
-		opts = append(opts, github.WithEnterpriseURLs(c.baseURL, c.baseURL+"/uploads"))
+		opts = append(opts, go_github.WithEnterpriseURLs(c.baseURL, c.baseURL+"/uploads"))
 	}
 
-	client, err := github.NewClient(opts...)
+	client, err := go_github.NewClient(opts...)
 	if err != nil {
 		// Should not happen with valid URL; fall back to a default client.
 		slog.Error("github client", "error", err)
-		client, _ = github.NewClient()
+		client, _ = go_github.NewClient()
 	}
 	return client
 }
@@ -141,10 +141,10 @@ func (c *Client) GetPR(ctx context.Context, installationID int64, owner, repo st
 		IsDraft: pr.GetDraft(),
 	}
 
-	var files []*github.CommitFile
+	var files []*go_github.CommitFile
 	page := 1
 	for {
-		pageFiles, resp, err := client.PullRequests.ListFiles(ctx, owner, repo, number, &github.ListOptions{Page: page, PerPage: 100})
+		pageFiles, resp, err := client.PullRequests.ListFiles(ctx, owner, repo, number, &go_github.ListOptions{Page: page, PerPage: 100})
 		if err != nil {
 			return nil, fmt.Errorf("list files: %w", err)
 		}
@@ -195,24 +195,24 @@ func (c *Client) GetPR(ctx context.Context, installationID int64, owner, repo st
 func (c *Client) PostReview(ctx context.Context, installationID int64, owner, repo string, number int, summary string, comments []FileComment, headSHA string) error {
 	client := c.installationClient(ctx, installationID)
 
-	draftComments := make([]*github.DraftReviewComment, 0, len(comments))
+	draftComments := make([]*go_github.DraftReviewComment, 0, len(comments))
 	for _, cm := range comments {
 		if cm.Position < 1 {
 			continue
 		}
-		draftComments = append(draftComments, &github.DraftReviewComment{
-			Path:     github.String(cm.Path),
-			Position: github.Int(cm.Position),
-			Body:     github.String(cm.Body),
-			Side:     github.String("RIGHT"),
+		draftComments = append(draftComments, &go_github.DraftReviewComment{
+			Path:     go_github.String(cm.Path),
+			Position: go_github.Int(cm.Position),
+			Body:     go_github.String(cm.Body),
+			Side:     go_github.String("RIGHT"),
 		})
 	}
 
-	_, _, err := client.PullRequests.CreateReview(ctx, owner, repo, number, &github.PullRequestReviewRequest{
-		Body:     github.String(summary),
-		Event:    github.String("COMMENT"),
+	_, _, err := client.PullRequests.CreateReview(ctx, owner, repo, number, &go_github.PullRequestReviewRequest{
+		Body:     go_github.String(summary),
+		Event:    go_github.String("COMMENT"),
 		Comments: draftComments,
-		CommitID: github.String(headSHA),
+		CommitID: go_github.String(headSHA),
 	})
 	if err != nil {
 		return fmt.Errorf("create review: %w", err)
@@ -230,7 +230,7 @@ type FileComment struct {
 // PostPendingComment posts a temporary "Review in progress…" issue comment.
 func (c *Client) PostPendingComment(ctx context.Context, installationID int64, owner, repo string, number int, body string) (int64, error) {
 	client := c.installationClient(ctx, installationID)
-	cm, _, err := client.Issues.CreateComment(ctx, owner, repo, number, &github.IssueComment{Body: github.String(body)})
+	cm, _, err := client.Issues.CreateComment(ctx, owner, repo, number, &go_github.IssueComment{Body: go_github.String(body)})
 	if err != nil {
 		return 0, fmt.Errorf("create pending comment: %w", err)
 	}
@@ -240,7 +240,7 @@ func (c *Client) PostPendingComment(ctx context.Context, installationID int64, o
 // EditComment updates an existing issue/PR comment.
 func (c *Client) EditComment(ctx context.Context, installationID int64, owner, repo string, commentID int64, body string) error {
 	client := c.installationClient(ctx, installationID)
-	_, _, err := client.Issues.EditComment(ctx, owner, repo, commentID, &github.IssueComment{Body: github.String(body)})
+	_, _, err := client.Issues.EditComment(ctx, owner, repo, commentID, &go_github.IssueComment{Body: go_github.String(body)})
 	if err != nil {
 		return fmt.Errorf("edit comment: %w", err)
 	}

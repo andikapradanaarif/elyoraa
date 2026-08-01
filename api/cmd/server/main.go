@@ -13,13 +13,13 @@ import (
 
 	"github.com/andikapradanaarif/elyoraa/internal/config"
 	"github.com/andikapradanaarif/elyoraa/internal/dedup"
-	gh "github.com/andikapradanaarif/elyoraa/internal/github"
 	"github.com/andikapradanaarif/elyoraa/internal/handler"
 	"github.com/andikapradanaarif/elyoraa/internal/metrics"
 	"github.com/andikapradanaarif/elyoraa/internal/middleware"
 	"github.com/andikapradanaarif/elyoraa/internal/repository"
 	"github.com/andikapradanaarif/elyoraa/internal/repository/cache"
 	"github.com/andikapradanaarif/elyoraa/internal/repository/queue"
+	"github.com/andikapradanaarif/elyoraa/internal/service/github"
 	"github.com/andikapradanaarif/elyoraa/internal/startup"
 	"github.com/andikapradanaarif/elyoraa/internal/usecase"
 	"github.com/andikapradanaarif/elyoraa/migration"
@@ -51,7 +51,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	ghClient, err := gh.NewClient(cfg.GitHubAppID, cfg.GitHubAppPrivateKeyPath)
+	githubClient, err := github.NewClient(cfg.GitHubAppID, cfg.GitHubAppPrivateKeyPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "github client: %v\n", err)
 		os.Exit(1)
@@ -89,10 +89,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	reviewUC := usecase.NewReviewUsecase(cfg, c, ghClient, d, store, m)
+	reviewUC := usecase.NewReviewUsecase(cfg, c, githubClient, d, store, m)
 	q := queue.NewWithBackend(cfg.MaxConcurrentReviews, reviewUC, m, qBackend)
 
-	webhookUC := usecase.NewWebhookUsecase(cfg, ghClient, d, q, store)
+	webhookUC := usecase.NewWebhookUsecase(cfg, githubClient, d, q, store)
 	h := handler.New(cfg, webhookUC, m)
 
 	go q.Start(ctx)

@@ -57,4 +57,4 @@ The codebase is organized in a Valo-style layered architecture:
 - `internal/repository/queue` — Queue backend implementations.
 - `internal/repository/cache` — Git bare-clone and worktree cache.
 - `internal/domain` — Shared domain types (`Review`, `WebhookEvent`).
-- `internal/github`, `internal/dedup`, `internal/metrics`, `internal/middleware`, `internal/startup`, `internal/config` stay as supporting packages.
+- `internal/service/github`, `internal/dedup`, `internal/metrics`, `internal/middleware`, `internal/startup`, `internal/config` stay as supporting packages.

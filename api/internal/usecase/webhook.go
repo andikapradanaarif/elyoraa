@@ -13,10 +13,10 @@ import (
 	"github.com/andikapradanaarif/elyoraa/internal/config"
 	"github.com/andikapradanaarif/elyoraa/internal/dedup"
 	"github.com/andikapradanaarif/elyoraa/internal/domain"
-	gh "github.com/andikapradanaarif/elyoraa/internal/github"
 	"github.com/andikapradanaarif/elyoraa/internal/repository"
 	"github.com/andikapradanaarif/elyoraa/internal/repository/queue"
-	"github.com/google/go-github/v88/github"
+	"github.com/andikapradanaarif/elyoraa/internal/service/github"
+	go_github "github.com/google/go-github/v88/github"
 )
 
 // ErrQueueFull is returned when the queue is at capacity.
@@ -45,14 +45,14 @@ func WithDeliveryID(ctx context.Context, deliveryID string) context.Context {
 // WebhookUsecase validates and routes incoming GitHub webhooks.
 type WebhookUsecase struct {
 	cfg   *config.Config
-	gh    *gh.Client
+	gh    *github.Client
 	d     *dedup.Dedup
 	q     *queue.Queue
 	store repository.WebhookStore
 }
 
 // NewWebhookUsecase creates a WebhookUsecase.
-func NewWebhookUsecase(cfg *config.Config, client *gh.Client, d *dedup.Dedup, q *queue.Queue, store repository.WebhookStore) *WebhookUsecase {
+func NewWebhookUsecase(cfg *config.Config, client *github.Client, d *dedup.Dedup, q *queue.Queue, store repository.WebhookStore) *WebhookUsecase {
 	return &WebhookUsecase{cfg: cfg, gh: client, d: d, q: q, store: store}
 }
 
@@ -78,7 +78,7 @@ func (u *WebhookUsecase) Handle(ctx context.Context, body []byte, signature stri
 		return domain.Review{}, nil
 	}
 
-	event, err := github.ParseWebHook(eventType, body)
+	event, err := go_github.ParseWebHook(eventType, body)
 	if err != nil {
 		_ = u.store.Record(ctx, &domain.WebhookEvent{
 			DeliveryID: deliveryID,
@@ -90,7 +90,7 @@ func (u *WebhookUsecase) Handle(ctx context.Context, body []byte, signature stri
 		return domain.Review{}, fmt.Errorf("parse: %w", err)
 	}
 
-	prEvent, ok := event.(*github.PullRequestEvent)
+	prEvent, ok := event.(*go_github.PullRequestEvent)
 	if !ok {
 		_ = u.store.Record(ctx, &domain.WebhookEvent{
 			DeliveryID: deliveryID,
@@ -197,7 +197,7 @@ func (u *WebhookUsecase) deliveryID(ctx context.Context) string {
 	return "elyoraa-" + hex.EncodeToString(b)
 }
 
-func (u *WebhookUsecase) webhookEvent(deliveryID string, prEvent *github.PullRequestEvent, body []byte, status, errMsg string) *domain.WebhookEvent {
+func (u *WebhookUsecase) webhookEvent(deliveryID string, prEvent *go_github.PullRequestEvent, body []byte, status, errMsg string) *domain.WebhookEvent {
 	evt := &domain.WebhookEvent{
 		DeliveryID: deliveryID,
 		EventType:  "pull_request",
