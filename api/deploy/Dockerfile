@@ -23,7 +23,8 @@ WORKDIR /app
 COPY --from=builder /build/elyoraa /app/elyoraa
 COPY --from=builder /build/prompts /app/prompts
 COPY deploy/git-askpass.sh /app/git-askpass.sh
-RUN chmod +x /app/git-askpass.sh
+COPY deploy/entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/git-askpass.sh /app/entrypoint.sh
 
 # Devin skill: install to the user's global skill directory.
 RUN mkdir -p /home/elyoraa/.config/devin/skills/pr-review
@@ -39,4 +40,4 @@ ENV XDG_CONFIG_HOME=/home/elyoraa/.config
 ENV ELYORAA_TOKEN_DIR=/tmp/elyoraa
 
 EXPOSE 8080
-ENTRYPOINT ["/app/elyoraa"]
+ENTRYPOINT ["/app/entrypoint.sh"]
