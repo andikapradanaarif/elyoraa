@@ -6,7 +6,7 @@ Go webhook engine that receives GitHub `pull_request` events and reviews them us
 
 ```bash
 cd api
-cp deploy/.env.example .env
+cp .env.example .env
 # edit .env with your GitHub App credentials and secret
 
 go build -o elyoraa .
