@@ -12,7 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-//go:embed all:migrations
+//go:embed migrations
 var migrationsFS embed.FS
 
 // Migrator applies versioned SQL migrations.
