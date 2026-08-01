@@ -28,6 +28,13 @@ cp .env.example .env
 docker compose up
 ```
 
+To push the image to GHCR:
+
+```bash
+cd api
+GHCR_TOKEN=your_pat ./deploy/deploy-ghcr.sh
+```
+
 The image is Debian-based because a host-provided `devin` binary is usually glibc-linked. The `devin` binary and `~/.config/devin` credentials are bind-mounted via `docker-compose.yml`.
 
 ## Notes

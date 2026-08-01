@@ -21,6 +21,8 @@ The server listens on `PORT` (default `8080`) and exposes:
 
 ## Docker
 
+### Local compose build
+
 ```bash
 cd api/deploy
 cp .env.example .env
@@ -31,6 +33,15 @@ mkdir -p secrets
 # Place your GitHub App private key at the path you set in .env
 
 docker compose up --build
+```
+
+### Push to GHCR
+
+```bash
+cd api
+./deploy/deploy-ghcr.sh
+# or with no cache:
+# GHCR_TOKEN=your_pat GITHUB_USER=your-username ./deploy/deploy-ghcr.sh --no-cache
 ```
 
 ## Requirements
