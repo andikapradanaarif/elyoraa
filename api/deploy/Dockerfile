@@ -12,8 +12,7 @@ RUN CGO_ENABLED=0 go build -o /build/elyoraa ./cmd/server && \
 # Use Debian slim because the host-provided `devin` binary is usually glibc-linked.
 FROM debian:bookworm-slim
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends git ca-certificates bubblewrap socat \
-        nodejs npm curl && \
+    apt-get install -y --no-install-recommends git ca-certificates bubblewrap socat curl && \
     rm -rf /var/lib/apt/lists/*
 
 # Devin CLI must be installed in the image or mounted in. This expects `devin` in PATH.

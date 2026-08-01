@@ -316,8 +316,8 @@ func WriteDevinConfig(dir string) error {
 	if os.Getenv("MEM0_API_KEY") != "" {
 		cfg["mcpServers"] = map[string]any{
 			"mem0": map[string]any{
-				"command": "npx",
-				"args":    []string{"-y", "mem0-mcp"},
+				"type": "http",
+				"url":  "https://mcp.mem0.ai/mcp",
 				"env": map[string]string{
 					"MEM0_API_KEY": os.Getenv("MEM0_API_KEY"),
 				},

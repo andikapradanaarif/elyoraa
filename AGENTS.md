@@ -48,7 +48,7 @@ The image is Debian-based because a host-provided `devin` binary is usually glib
 - The server needs `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_WEBHOOK_SECRET`, `DEVIN_BIN`, `WORKSPACE_BASE`, and `DEVIN_CONFIG_DIR`.
 - `DEVIN_CONFIG_DIR` (directory, not file) is where `devin-config.json` is written at startup. This is safe for directory bind-mounts.
 - `PROMPTS_DIR` (default `/app/prompts`) holds the review prompt template.
-- Node.js and npm are installed in the Docker image so `npx -y mem0-mcp` works when `MEM0_API_KEY` is set.
+- mem0 is configured as a remote HTTP MCP server (`https://mcp.mem0.ai/mcp`) when `MEM0_API_KEY` is set. No Node.js required.
 - The Docker image includes a `HEALTHCHECK` that hits `GET /health`.
 - Set `DATABASE_URL` (optional) to enable the PostgreSQL webhook audit log.
 - Set `QUEUE_BACKEND=file` and `QUEUE_FILE_PATH` to use the BoltDB-backed queue.
