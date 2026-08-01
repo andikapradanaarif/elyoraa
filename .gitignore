@@ -17,3 +17,5 @@ queue.db
 
 # OS
 .DS_Store
+*/local/*
+*/docs/local/*

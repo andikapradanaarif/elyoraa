@@ -56,10 +56,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	tokenDir := os.Getenv("ELYORAA_TOKEN_DIR")
-	if tokenDir == "" {
-		tokenDir = "/tmp/elyoraa"
-	}
+	tokenDir := cfg.TokenDir
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

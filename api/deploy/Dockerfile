@@ -39,7 +39,6 @@ RUN mkdir -p /var/lib/elyoraa/workspace /tmp/elyoraa && chown -R elyoraa:elyoraa
 USER elyoraa
 ENV HOME=/home/elyoraa
 ENV XDG_CONFIG_HOME=/home/elyoraa/.config
-ENV ELYORAA_TOKEN_DIR=/tmp/elyoraa
 
 EXPOSE 8080
 ENTRYPOINT ["/app/entrypoint.sh"]

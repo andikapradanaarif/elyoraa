@@ -20,6 +20,7 @@ type Config struct {
 	DevinConfigPath         string
 	DevinModel              string
 	BotHandle               string
+	TokenDir                string
 	WorkspaceBase           string
 	MaxConcurrentReviews    int
 	WorktreeTTLHours        time.Duration
@@ -50,6 +51,7 @@ func Load() (*Config, error) {
 		DevinConfigPath:       getEnv("DEVIN_CONFIG_PATH", "/app/devin-config.json"),
 		DevinModel:            getEnv("DEVIN_MODEL", "swe-1.7"),
 		BotHandle:             getEnv("BOT_HANDLE", "elyoraa"),
+		TokenDir:              getEnv("ELYORAA_TOKEN_DIR", "/tmp/elyoraa"),
 		WorkspaceBase:         getEnv("WORKSPACE_BASE", "/var/lib/elyoraa/workspace"),
 		MaxConcurrentReviews:  getInt("MAX_CONCURRENT_REVIEWS", 2),
 		WorktreeTTLHours:      time.Duration(getInt("WORKTREE_TTL_HOURS", 24)) * time.Hour,
