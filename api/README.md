@@ -13,6 +13,20 @@ make build
 ./elyoraa
 ```
 
+For local development, `make dev` runs the server directly with `go run`.
+
+## Migrations
+
+Migrations are applied automatically when the server starts. To run them manually:
+
+```bash
+# Apply all pending migrations (DATABASE_URL required)
+make migrate-up
+
+# Revert the last applied migration (DATABASE_URL required)
+make migrate-down
+```
+
 The server listens on `PORT` (default `8080`) and exposes:
 
 - `POST /webhook` — GitHub webhook endpoint.
@@ -63,7 +77,6 @@ api/
 │   ├── handler/            # HTTP handlers (webhook, health, metrics)
 │   ├── usecase/            # business logic (webhook, review orchestration)
 │   ├── repository/         # PostgreSQL pool, webhook store
-├── migration/              # versioned PostgreSQL migrations
 │   ├── repository/queue/   # in-memory (default) or BoltDB file-backed worker queue
 │   ├── repository/cache/   # bare-clone cache + worktrees
 │   ├── domain/             # shared domain types (Review, WebhookEvent)
@@ -72,6 +85,7 @@ api/
 │   ├── metrics/            # Prometheus text metrics
 │   ├── middleware/         # request ID / access logging
 │   └── startup/            # startup validation
+├── migration/              # versioned PostgreSQL migrations and runner
 ├── prompts/review.md       # Devin prompt template
 └── deploy/                 # Dockerfile, compose, askpass, skill
 ```

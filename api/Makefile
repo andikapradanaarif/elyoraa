@@ -5,7 +5,7 @@ GOTEST=$(GOCMD) test
 GOMOD=$(GOCMD) mod
 BINARY_NAME=elyoraa
 
-.PHONY: build dev test vet coverage clean lint format deps docker-build docker-up docker-down deploy-ghcr help
+.PHONY: build dev test vet coverage clean lint format deps docker-build docker-up docker-down deploy-ghcr migrate-up migrate-down help
 
 build:
 	$(GOBUILD) -o $(BINARY_NAME) ./cmd/server
@@ -26,6 +26,7 @@ coverage:
 clean:
 	$(GOCLEAN)
 	rm -f $(BINARY_NAME)
+	rm -f $(BINARY_NAME)-migrate
 	rm -f coverage.out
 	rm -f coverage.html
 
@@ -51,6 +52,12 @@ docker-down:
 deploy-ghcr:
 	./deploy/deploy-ghcr.sh
 
+migrate-up:
+	go run ./cmd/migrate
+
+migrate-down:
+	go run ./cmd/migrate -down
+
 help:
 	@echo "Available commands:"
 	@echo "  build        : Build the binary"
@@ -65,4 +72,6 @@ help:
 	@echo "  docker-build : Build the Docker image"
 	@echo "  docker-up    : Start docker compose"
 	@echo "  docker-down  : Stop docker compose"
+	@echo "  migrate-up   : Apply Postgres migrations (requires DATABASE_URL)"
+	@echo "  migrate-down : Revert the last Postgres migration (requires DATABASE_URL)"
 	@echo "  deploy-ghcr  : Build and push to GHCR"
