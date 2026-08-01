@@ -17,6 +17,7 @@ Here is the diff:
 ```diff
 {{.PatchText}}
 ```
+
 {{end}}
 
 ## Files changed
@@ -24,11 +25,17 @@ Here is the diff:
 {{range .Files}}- `{{.Path}}` (+{{.Additions}} / -{{.Deletions}}) [{{.Status}}]
 {{end}}
 
-## Memory
+## Memory (must do)
 
-Before reviewing, search mem0 for context keyed by `{{.RepoKey}}` and `{{.Author}}`.
-After reviewing, store any high-level patterns you learned about this repo or author back to mem0.
-Never store raw code snippets, diffs, or secrets in mem0. Store only concise patterns.
+1. **Before you start the review**, call `mcp__mem0__search` with:
+   - `user_id={{.Author}}`
+   - `metadata={"repo": "{{.RepoKey}}"}`
+
+   Read the returned context and let it guide your review (repo conventions, author preferences, recurring issues).
+
+2. **After the review**, call `mcp__mem0__add` to store 1-3 high-level, non-sensitive patterns you learned.
+   - Never store raw code, diffs, secrets, or token values.
+   - Only store concise, reusable observations (e.g., "repo uses table-driven tests", "author prefers early returns").
 
 ## Instructions
 
@@ -44,15 +51,15 @@ Return a JSON block inside ` ```json ` fences with this exact shape:
 
 ```json
 {
-  "summary": "Overall assessment in Markdown. Include counts by severity.",
-  "comments": [
-    {
-      "path": "relative/path/from/repo/root.go",
-      "line": 42,
-      "severity": "high|medium|low",
-      "body": "Specific, actionable feedback."
-    }
-  ]
+	"summary": "Overall assessment in Markdown. Include counts by severity.",
+	"comments": [
+		{
+			"path": "relative/path/from/repo/root.go",
+			"line": 42,
+			"severity": "high|medium|low",
+			"body": "Specific, actionable feedback."
+		}
+	]
 }
 ```
 
