@@ -58,13 +58,17 @@ api/
 ├── main.go                 # entrypoint
 ├── internal/
 │   ├── config/             # env config
+│   ├── handler/            # HTTP handlers (webhook, health, metrics)
+│   ├── usecase/            # business logic (webhook, review orchestration)
+│   ├── repository/         # PostgreSQL pool, migrations, webhook store
+│   ├── repository/queue/   # in-memory (default) or BoltDB file-backed worker queue
+│   ├── repository/cache/   # bare-clone cache + worktrees
+│   ├── domain/             # shared domain types (Review, WebhookEvent)
 │   ├── github/             # GitHub App auth, PR fetch, review posting
-│   ├── cache/              # bare-clone cache + worktrees
 │   ├── dedup/              # in-flight job deduplication
-│   ├── queue/              # in-memory (default) or BoltDB file-backed worker queue
-│   ├── webhook/            # HTTP handler
-│   ├── reviewer/           # Devin prompt/review orchestrator
-│   └── metrics/            # Prometheus text metrics
+│   ├── metrics/            # Prometheus text metrics
+│   ├── middleware/         # request ID / access logging
+│   └── startup/            # startup validation
 ├── prompts/review.md       # Devin prompt template
 └── deploy/                 # Dockerfile, compose, askpass, skill
 ```
@@ -74,4 +78,5 @@ api/
 - The `devin-config.json` is generated at startup to the path in `DEVIN_CONFIG_PATH`.
 - Short-lived GitHub installation tokens are written to `ELYORAA_TOKEN_DIR` (default `/tmp/elyoraa`) and supplied to git via `GIT_ASKPASS`.
 - Per-review `XDG_CACHE_HOME` and `TMPDIR` are isolated; `HOME` and `XDG_CONFIG_HOME` must point at the Devin credentials volume.
+- Set `DATABASE_URL` to enable PostgreSQL webhook audit logging.
 - Set `QUEUE_BACKEND=file` and `QUEUE_FILE_PATH` to use the BoltDB-backed queue.

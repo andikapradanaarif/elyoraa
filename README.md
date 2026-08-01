@@ -15,5 +15,6 @@ Phase 1 MVP is implemented under `api/`:
 - GitHub App auth, webhook verification, PR fetch, and review posting.
 - Prompt rendering, Devin CLI runner, and JSON output parser.
 - Prometheus-style `/metrics`, `/health`, and `/webhook` endpoints.
-
-Phase 1.5/2 (file-backed/Redis queue and full observability) are not yet implemented.
+- Optional PostgreSQL webhook audit log.
+- Optional BoltDB-backed queue (`QUEUE_BACKEND=file`).
+- Layered `handler > usecase > repository` architecture.

@@ -40,5 +40,18 @@ The image is Debian-based because a host-provided `devin` binary is usually glib
 ## Notes
 
 - The server needs `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_WEBHOOK_SECRET`, `DEVIN_BIN`, `WORKSPACE_BASE`, and `DEVIN_CONFIG_PATH`.
+- Set `DATABASE_URL` (optional) to enable the PostgreSQL webhook audit log.
 - Set `QUEUE_BACKEND=file` and `QUEUE_FILE_PATH` to use the BoltDB-backed queue.
 - The Devin auth spike is not yet implemented.
+
+## Architecture
+
+The codebase is organized in a Valo-style layered architecture:
+
+- `internal/handler` — HTTP handlers (webhook, health, metrics).
+- `internal/usecase` — Business use cases (`WebhookUsecase`, `ReviewUsecase`).
+- `internal/repository` — PostgreSQL pool, migrations, and the `WebhookStore` interface.
+- `internal/repository/queue` — Queue backend implementations.
+- `internal/repository/cache` — Git bare-clone and worktree cache.
+- `internal/domain` — Shared domain types (`Review`, `WebhookEvent`).
+- `internal/github`, `internal/dedup`, `internal/metrics`, `internal/middleware`, `internal/startup`, `internal/config` stay as supporting packages.
