@@ -17,6 +17,7 @@ import (
 	"github.com/andikapradanaarif/elyoraa/internal/handler"
 	"github.com/andikapradanaarif/elyoraa/internal/metrics"
 	"github.com/andikapradanaarif/elyoraa/internal/middleware"
+	"github.com/andikapradanaarif/elyoraa/internal/migrate"
 	"github.com/andikapradanaarif/elyoraa/internal/repository"
 	"github.com/andikapradanaarif/elyoraa/internal/repository/cache"
 	"github.com/andikapradanaarif/elyoraa/internal/repository/queue"
@@ -70,7 +71,7 @@ func main() {
 		os.Exit(1)
 	}
 	if db != nil {
-		if err := repository.Migrate(ctx, db); err != nil {
+		if err := migrate.New(db).Up(ctx); err != nil {
 			fmt.Fprintf(os.Stderr, "migrate: %v\n", err)
 			os.Exit(1)
 		}
