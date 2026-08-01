@@ -3,6 +3,7 @@ package cache
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -16,6 +17,10 @@ import (
 
 	"golang.org/x/sync/singleflight"
 )
+
+// ErrRepoNotCloned is returned when the bare clone for a repository does not
+// exist on disk. Repositories must be pre-cloned at {base}/{owner}/{repo}.git.
+var ErrRepoNotCloned = errors.New("repository not cloned on server")
 
 // Cache manages bare clones and per-review worktrees.
 type Cache struct {
@@ -33,6 +38,12 @@ func New(base, askpassPath, tokenDir string) *Cache {
 		askpassPath: askpassPath,
 		tokenDir:    tokenDir,
 	}
+}
+
+// IsCloned reports whether a bare clone exists for owner/repo.
+func (c *Cache) IsCloned(owner, repo string) bool {
+	info, err := os.Stat(c.barePath(owner, repo))
+	return err == nil && info.IsDir()
 }
 
 // EnsureBareClone returns once a bare clone exists for owner/repo.
@@ -176,50 +187,23 @@ func (c *Cache) DiskUsageGB() (int64, error) {
 
 func (c *Cache) ensureBareCloneOnce(ctx context.Context, owner, repo, token string) error {
 	bare := c.barePath(owner, repo)
-	_, err := os.Stat(bare)
+	info, err := os.Stat(bare)
 	if err == nil {
+		if !info.IsDir() {
+			return fmt.Errorf("bare clone path is not a directory: %s", bare)
+		}
 		return nil
 	}
 	if !os.IsNotExist(err) {
 		return err
 	}
 
-	if err := os.MkdirAll(c.repoBase(owner), 0o755); err != nil {
-		return fmt.Errorf("mkdir repo base: %w", err)
-	}
-
-	tokenFile, cleanup, err := c.writeToken(token)
-	if err != nil {
-		return err
-	}
-	defer cleanup()
-
-	cloneURL := fmt.Sprintf("https://github.com/%s/%s.git", owner, repo)
-	cmd := exec.CommandContext(ctx, "git", "clone", "--bare", "--origin", "origin", cloneURL, bare)
-	cmd.Env = c.gitEnv(tokenFile)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("git clone: %w\n%s", err, out)
-	}
-
-	// Reset remote URL to token-less value (it already is, but be explicit).
-	if out, err := exec.CommandContext(ctx, "git", "-C", bare, "remote", "set-url", "origin", cloneURL).CombinedOutput(); err != nil {
-		return fmt.Errorf("git remote set-url: %w\n%s", err, out)
-	}
-
-	// Fetch PR heads automatically for fork PR support.
-	cmd = exec.CommandContext(ctx, "git", "-C", bare, "config", "--local", "--add", "remote.origin.fetch", "+refs/pull/*/head:refs/remotes/origin/pr/*")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("git config fetch refspec: %w\n%s", err, out)
-	}
-
-	// Initial fetch to populate PR refs.
-	cmd = exec.CommandContext(ctx, "git", "-C", bare, "fetch", "--prune")
-	cmd.Env = c.gitEnv(tokenFile)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("initial git fetch: %w\n%s", err, out)
-	}
-
-	return nil
+	// Repositories must be pre-cloned on the server. We do not clone on demand.
+	// To register a repo for review, run on the server:
+	//   git clone --bare https://github.com/{owner}/{repo}.git {WORKSPACE_BASE}/{owner}/{repo}.git
+	//   git -C {WORKSPACE_BASE}/{owner}/{repo}.git config --local --add \
+	//     remote.origin.fetch "+refs/pull/*/head:refs/remotes/origin/pr/*"
+	return ErrRepoNotCloned
 }
 
 func (c *Cache) removeWorktree(worktreePath, bare string) {

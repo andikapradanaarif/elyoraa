@@ -52,6 +52,7 @@ The image is Debian-based because a host-provided `devin` binary is usually glib
 
 ## Review flow
 
+- Repositories must be pre-cloned as bare clones at `WORKSPACE_BASE/{owner}/{repo}.git`. The bot does not clone on demand; if a repo is not cloned, the review is skipped with a comment.
 - Webhook events: `pull_request` (`opened`, `reopened`, `ready_for_review`) and `issue_comment` (rereview by mention).
 - Draft PRs and `synchronize` pushes are ignored.
 - Rereview is triggered by a PR comment mentioning the bot handle (`BOT_HANDLE`, default `elyoraa`) with a rereview keyword (`rereview`, `re-review`, `review again`, `recheck`, `check again`).

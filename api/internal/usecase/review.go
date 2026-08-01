@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -75,6 +76,15 @@ func (r *ReviewUsecase) Process(ctx context.Context, j domain.Review) (err error
 	}
 
 	if err := r.cache.Fetch(ctx, j.Owner, j.Repo, token); err != nil {
+		if errors.Is(err, cache.ErrRepoNotCloned) {
+			r.updatePending(ctx, &j, fmt.Sprintf(
+				"Review skipped: repository `%s/%s` is not cloned on this server. "+
+					"Clone it first at `%s/%s/%s.git`.",
+				j.Owner, j.Repo, r.cfg.WorkspaceBase, j.Owner, j.Repo,
+			))
+			r.markStatus(ctx, j, "skipped")
+			return nil
+		}
 		r.updatePending(ctx, &j, "Review failed: could not fetch repository.")
 		r.markFailed(ctx, j, "cache fetch")
 		return fmt.Errorf("cache fetch: %w", err)

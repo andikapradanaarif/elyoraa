@@ -91,6 +91,12 @@ api/
 
 ## Notes
 
+- **Repositories must be pre-cloned** as bare clones at `WORKSPACE_BASE/{owner}/{repo}.git`. The bot will not clone repos on demand. If a repo is not cloned, the review is skipped with a comment. To register a repo:
+  ```bash
+  git clone --bare https://github.com/{owner}/{repo}.git {WORKSPACE_BASE}/{owner}/{repo}.git
+  git -C {WORKSPACE_BASE}/{owner}/{repo}.git config --local --add \
+    remote.origin.fetch "+refs/pull/*/head:refs/remotes/origin/pr/*"
+  ```
 - The `devin-config.json` is generated at startup to the path in `DEVIN_CONFIG_PATH`.
 - Short-lived GitHub installation tokens are written to `ELYORAA_TOKEN_DIR` (default `/tmp/elyoraa`) and supplied to git via `GIT_ASKPASS`.
 - Per-review `XDG_CACHE_HOME` and `TMPDIR` are isolated; `HOME` and `XDG_CONFIG_HOME` must point at the Devin credentials volume.
