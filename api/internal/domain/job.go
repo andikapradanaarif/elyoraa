@@ -20,6 +20,7 @@ type Review struct {
 	Body             string
 	Type             string // "review" (default) or "issue"
 	TriggerComment   string // the comment that triggered this job, if any
+	RepoAvailable    bool   // whether the repo was cloned and available for analysis
 	PendingCommentID int64 // issue comment ID for "Review in progress…"
 	EnqueuedAt       time.Time
 }

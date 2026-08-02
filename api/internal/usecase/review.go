@@ -195,7 +195,9 @@ func (r *ReviewUsecase) markFailed(ctx context.Context, j domain.Review, msg str
 }
 
 // processIssue handles an issue analysis job: spawn Devin to analyze the issue
-// and post the response as a comment.
+// and post the response as a comment. If the repo is cloned on the server,
+// Devin gets a worktree so it can search the code. If not, Devin analyzes
+// from the issue text alone and mentions that the repo isn't available.
 func (r *ReviewUsecase) processIssue(ctx context.Context, j *domain.Review) error {
 	pendingBody := "Analyzing issue…\n\n<!-- elyoraa-in-progress -->"
 	pendingCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -207,6 +209,39 @@ func (r *ReviewUsecase) processIssue(ctx context.Context, j *domain.Review) erro
 		j.PendingCommentID = commentID
 	}
 
+	// Try to get a worktree so Devin can search the repo code.
+	// If the repo isn't cloned, fall back to a temp dir and tell Devin.
+	workdir := ""
+	var cleanup func()
+	repoAvailable := false
+
+	token, tokenErr := r.gh.InstallationToken(ctx, j.InstallationID)
+	if tokenErr == nil {
+		if fetchErr := r.cache.Fetch(ctx, j.Owner, j.Repo, token); fetchErr == nil {
+			// Use the default branch HEAD as the worktree base.
+			wt, cl, wtErr := r.cache.AddWorktree(ctx, j.Owner, j.Repo, j.PRNumber, "HEAD")
+			if wtErr == nil {
+				workdir = wt
+				cleanup = cl
+				repoAvailable = true
+			}
+		}
+	}
+
+	if workdir == "" {
+		tmpDir, err := os.MkdirTemp("", "elyoraa-issue-*")
+		if err != nil {
+			r.updatePending(ctx, j, "Issue analysis failed: internal error.")
+			r.markFailed(ctx, *j, "mkdir temp")
+			return fmt.Errorf("mkdir temp: %w", err)
+		}
+		workdir = tmpDir
+		cleanup = func() { os.RemoveAll(tmpDir) }
+	}
+	defer cleanup()
+
+	j.RepoAvailable = repoAvailable
+
 	prompt, err := r.renderIssuePrompt(j)
 	if err != nil {
 		r.updatePending(ctx, j, "Issue analysis failed: could not render prompt.")
@@ -214,16 +249,7 @@ func (r *ReviewUsecase) processIssue(ctx context.Context, j *domain.Review) erro
 		return fmt.Errorf("render issue prompt: %w", err)
 	}
 
-	// Run Devin in a temp dir (no worktree needed for issue analysis).
-	tmpDir, err := os.MkdirTemp("", "elyoraa-issue-*")
-	if err != nil {
-		r.updatePending(ctx, j, "Issue analysis failed: internal error.")
-		r.markFailed(ctx, *j, "mkdir temp")
-		return fmt.Errorf("mkdir temp: %w", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	out, err := r.runDevin(ctx, tmpDir, prompt)
+	out, err := r.runDevin(ctx, workdir, prompt)
 	if err != nil {
 		if ctx.Err() == context.Canceled {
 			r.updatePending(ctx, j, "Issue analysis cancelled.")
@@ -269,6 +295,7 @@ func (r *ReviewUsecase) renderIssuePrompt(j *domain.Review) (string, error) {
 		"Body":           j.Body,
 		"TriggerComment": j.TriggerComment,
 		"BotHandle":      r.cfg.BotHandle,
+		"RepoAvailable":  j.RepoAvailable,
 	}
 
 	var buf bytes.Buffer
