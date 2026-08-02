@@ -10,7 +10,8 @@ services:
       # Bind-mount the host repo directory into the container.
       # Clone repos to ~/app/elyoraa/repo/{owner}/{repo}.git on the host.
       - ${WORKSPACE_HOST_PATH:-~/app/elyoraa/repo}:/var/lib/elyoraa/workspace
-      - devin-creds:/home/elyoraa/.config/devin
+      # Bind-mount the host's Devin credentials so the CLI is authenticated.
+      - ${DEVIN_CREDS_HOST_PATH:-~/.config/devin}:/home/elyoraa/.config/devin
       - devin-config:/var/lib/elyoraa/devin-config
       # Bind the host's `devin` binary into the container.
       # Use the symlink path (e.g. /usr/local/bin/devin) rather than a
@@ -27,7 +28,6 @@ services:
       - "seccomp:unconfined"
 
 volumes:
-  devin-creds:
   devin-config:
 
 secrets:
