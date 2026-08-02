@@ -205,6 +205,15 @@ func (u *WebhookUsecase) handleIssueComment(ctx context.Context, deliveryID stri
 		_ = u.store.Record(ctx, u.commentWebhookEvent(deliveryID, cmEvent, body, "ignored", ""))
 		return domain.Review{}, nil
 	}
+
+	// Ignore comments from bots (including ourselves) to prevent feedback loops.
+	commentAuthor := strings.ToLower(comment.GetUser().GetLogin())
+	if strings.HasSuffix(commentAuthor, "[bot]") || strings.Contains(commentAuthor, "github-actions") {
+		slog.Info("issue_comment ignored: bot author", "delivery", deliveryID, "author", commentAuthor)
+		_ = u.store.Record(ctx, u.commentWebhookEvent(deliveryID, cmEvent, body, "ignored", ""))
+		return domain.Review{}, nil
+	}
+
 	if !u.isBotMentioned(comment.GetBody()) {
 		slog.Info("issue_comment ignored: bot not mentioned", "delivery", deliveryID, "handle", u.cfg.BotHandle)
 		_ = u.store.Record(ctx, u.commentWebhookEvent(deliveryID, cmEvent, body, "ignored", ""))
@@ -429,7 +438,22 @@ func (u *WebhookUsecase) handlePullRequestReview(ctx context.Context, deliveryID
 	}
 
 	review := rvEvent.GetReview()
-	if review == nil || !u.isBotMentioned(review.GetBody()) {
+	if review == nil {
+		_ = u.store.Record(ctx, &domain.WebhookEvent{
+			DeliveryID: deliveryID, EventType: "pull_request_review",
+			Action: action, Status: "ignored", Payload: body, ReceivedAt: time.Now(),
+		})
+		return domain.Review{}, nil
+	}
+	reviewAuthor := strings.ToLower(review.GetUser().GetLogin())
+	if strings.HasSuffix(reviewAuthor, "[bot]") || strings.Contains(reviewAuthor, "github-actions") {
+		_ = u.store.Record(ctx, &domain.WebhookEvent{
+			DeliveryID: deliveryID, EventType: "pull_request_review",
+			Action: action, Status: "ignored", Payload: body, ReceivedAt: time.Now(),
+		})
+		return domain.Review{}, nil
+	}
+	if !u.isBotMentioned(review.GetBody()) {
 		_ = u.store.Record(ctx, &domain.WebhookEvent{
 			DeliveryID: deliveryID, EventType: "pull_request_review",
 			Action: action, Status: "ignored", Payload: body, ReceivedAt: time.Now(),
@@ -503,7 +527,22 @@ func (u *WebhookUsecase) handlePullRequestReviewComment(ctx context.Context, del
 	}
 
 	comment := rcEvent.GetComment()
-	if comment == nil || !u.isBotMentioned(comment.GetBody()) {
+	if comment == nil {
+		_ = u.store.Record(ctx, &domain.WebhookEvent{
+			DeliveryID: deliveryID, EventType: "pull_request_review_comment",
+			Action: action, Status: "ignored", Payload: body, ReceivedAt: time.Now(),
+		})
+		return domain.Review{}, nil
+	}
+	commentAuthor := strings.ToLower(comment.GetUser().GetLogin())
+	if strings.HasSuffix(commentAuthor, "[bot]") || strings.Contains(commentAuthor, "github-actions") {
+		_ = u.store.Record(ctx, &domain.WebhookEvent{
+			DeliveryID: deliveryID, EventType: "pull_request_review_comment",
+			Action: action, Status: "ignored", Payload: body, ReceivedAt: time.Now(),
+		})
+		return domain.Review{}, nil
+	}
+	if !u.isBotMentioned(comment.GetBody()) {
 		_ = u.store.Record(ctx, &domain.WebhookEvent{
 			DeliveryID: deliveryID, EventType: "pull_request_review_comment",
 			Action: action, Status: "ignored", Payload: body, ReceivedAt: time.Now(),
