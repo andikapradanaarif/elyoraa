@@ -9,7 +9,9 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - workspace:/var/lib/elyoraa/workspace
+      # Bind-mount the host repo directory into the container.
+      # Clone repos to ~/app/elyoraa/repo/{owner}/{repo}.git on the host.
+      - ${WORKSPACE_HOST_PATH:-~/app/elyoraa/repo}:/var/lib/elyoraa/workspace
       - devin-creds:/home/elyoraa/.config/devin
       - devin-config:/var/lib/elyoraa/devin-config
       # Bind the host's `devin` binary into the container.
@@ -27,7 +29,6 @@ services:
       - "seccomp:unconfined"
 
 volumes:
-  workspace:
   devin-creds:
   devin-config:
 
