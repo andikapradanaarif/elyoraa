@@ -296,10 +296,13 @@ func (u *WebhookUsecase) isRereviewRequest(body string) bool {
 }
 
 func (u *WebhookUsecase) enqueueReview(ctx context.Context, review domain.Review, evt *domain.WebhookEvent) (domain.Review, error) {
-	if review.IsBot() {
+	// Skip bot-authored PRs for auto-reviews, but allow explicit mentions
+	// (rereview/issue analysis) to proceed even if the PR was bot-authored.
+	if review.IsBot() && review.TriggerComment == "" {
 		if evt != nil {
 			_ = u.store.Record(ctx, evt)
 		}
+		slog.Info("skipping bot-authored PR (auto-review)", "author", review.Author)
 		return domain.Review{}, nil
 	}
 
