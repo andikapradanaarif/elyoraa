@@ -384,6 +384,7 @@ func (r *ReviewUsecase) runDevin(ctx context.Context, worktree, prompt string) (
 		"--permission-mode", "autonomous",
 		"--model", r.cfg.DevinModel,
 		"--config", filepath.Join(r.cfg.DevinConfigDir, "devin-config.json"),
+		"--respect-workspace-trust", "false",
 		"--prompt-file", promptFile,
 	)
 	cmd.Dir = worktree
