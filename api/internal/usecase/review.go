@@ -376,6 +376,7 @@ func (r *ReviewUsecase) runDevin(ctx context.Context, worktree, prompt string) (
 
 	out, err := cmd.CombinedOutput()
 	if err != nil {
+		slog.Error("devin command failed", "bin", r.cfg.DevinBin, "workdir", worktree, "error", err, "output", string(out))
 		return string(out), err
 	}
 	return string(out), nil
