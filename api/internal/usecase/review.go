@@ -175,6 +175,23 @@ func (r *ReviewUsecase) Process(ctx context.Context, j domain.Review) (err error
 	}
 
 	if err := r.gh.PostReview(ctx, j.InstallationID, j.Owner, j.Repo, j.PRNumber, summary, fileComments, j.HeadSHA, state); err != nil {
+		// GitHub rejects approving your own PR. If the PR was authored by a bot
+		// (e.g. elyoraa[bot]/Devin), fall back to posting a comment instead.
+		if j.IsBot() && state == "APPROVE" {
+			slog.Info("cannot approve own PR, posting comment instead", "author", j.Author)
+			commentBody := "✅ **Review complete — no issues found.**\n\n" + summary
+			if j.PendingCommentID != 0 {
+				editCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				_ = r.gh.EditComment(editCtx, j.InstallationID, j.Owner, j.Repo, j.PendingCommentID, commentBody)
+				cancel()
+			} else {
+				postCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				_, _ = r.gh.PostPendingComment(postCtx, j.InstallationID, j.Owner, j.Repo, j.PRNumber, commentBody)
+				cancel()
+			}
+			r.markStatus(ctx, j, "completed")
+			return nil
+		}
 		r.updatePending(ctx, &j, "Review failed: could not post review comments.")
 		r.markFailed(ctx, j, "post review")
 		return fmt.Errorf("post review: %w", err)
