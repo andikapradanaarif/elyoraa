@@ -50,6 +50,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	eventType := r.Header.Get("X-GitHub-Event")
 	deliveryID := r.Header.Get("X-GitHub-Delivery")
 
+	slog.Info("webhook received", "event", eventType, "delivery", deliveryID)
+
 	// GitHub sends a ping event when the webhook is first configured.
 	// Respond with 200 so GitHub marks the webhook as active.
 	if eventType == "ping" {
@@ -61,14 +63,20 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := usecase.WithDeliveryID(r.Context(), deliveryID)
 	ctx = usecase.WithEventType(ctx, eventType)
 
-	_, err = h.uc.Handle(ctx, payload, sig)
+	review, err := h.uc.Handle(ctx, payload, sig)
 	if err != nil {
 		if !errors.Is(err, usecase.ErrQueueFull) && !errors.Is(err, usecase.ErrDuplicate) {
-			slog.Warn("webhook handle", "error", err)
+			slog.Warn("webhook handle", "event", eventType, "delivery", deliveryID, "error", err)
 			http.Error(w, "webhook", http.StatusBadRequest)
 			return
 		}
-		slog.Info("webhook dropped", "error", err)
+		slog.Info("webhook dropped", "event", eventType, "delivery", deliveryID, "error", err)
+	}
+
+	if review.JobKey != "" {
+		slog.Info("review enqueued", "event", eventType, "delivery", deliveryID, "job", review.JobKey, "type", review.Type, "owner", review.Owner, "repo", review.Repo, "pr", review.PRNumber)
+	} else {
+		slog.Info("webhook ignored", "event", eventType, "delivery", deliveryID)
 	}
 
 	w.WriteHeader(http.StatusOK)

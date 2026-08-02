@@ -187,21 +187,31 @@ func (u *WebhookUsecase) handleIssueComment(ctx context.Context, deliveryID stri
 
 	action := cmEvent.GetAction()
 	if action != "created" && action != "edited" {
+		slog.Info("issue_comment ignored", "action", action, "delivery", deliveryID)
 		_ = u.store.Record(ctx, u.commentWebhookEvent(deliveryID, cmEvent, body, "ignored", ""))
 		return domain.Review{}, nil
 	}
 
 	issue := cmEvent.GetIssue()
 	if issue == nil {
+		slog.Info("issue_comment ignored: no issue", "delivery", deliveryID)
 		_ = u.store.Record(ctx, u.commentWebhookEvent(deliveryID, cmEvent, body, "ignored", ""))
 		return domain.Review{}, nil
 	}
 
 	comment := cmEvent.GetComment()
-	if comment == nil || !u.isBotMentioned(comment.GetBody()) {
+	if comment == nil {
+		slog.Info("issue_comment ignored: no comment", "delivery", deliveryID)
 		_ = u.store.Record(ctx, u.commentWebhookEvent(deliveryID, cmEvent, body, "ignored", ""))
 		return domain.Review{}, nil
 	}
+	if !u.isBotMentioned(comment.GetBody()) {
+		slog.Info("issue_comment ignored: bot not mentioned", "delivery", deliveryID, "handle", u.cfg.BotHandle)
+		_ = u.store.Record(ctx, u.commentWebhookEvent(deliveryID, cmEvent, body, "ignored", ""))
+		return domain.Review{}, nil
+	}
+
+	slog.Info("issue_comment: bot mentioned", "delivery", deliveryID, "is_pr", issue.IsPullRequest(), "issue_number", issue.GetNumber())
 
 	repo := cmEvent.GetRepo()
 	if repo == nil || repo.GetFullName() == "" {
