@@ -8,14 +8,14 @@ services:
       - "8080:8080"
     volumes:
       # Bind-mount the host repo directory into the container.
-      # Clone repos to ~/app/elyoraa/repo/{owner}/{repo}.git on the host.
-      - ${WORKSPACE_HOST_PATH:-~/app/elyoraa/repo}:/var/lib/elyoraa/workspace
+      # Clone repos to {WORKSPACE_HOST_PATH}/{owner}/{repo}.git on the host.
+      # Must be an absolute path (no ~) — especially when running with sudo.
+      - ${WORKSPACE_HOST_PATH:?WORKSPACE_HOST_PATH must be set in .env}:/var/lib/elyoraa/workspace
       # Bind-mount the host's Devin credentials so the CLI is authenticated.
-      - ${DEVIN_CREDS_HOST_PATH:-~/.config/devin}:/home/elyoraa/.config/devin
+      # Must be an absolute path (no ~).
+      - ${DEVIN_CREDS_HOST_PATH:?DEVIN_CREDS_HOST_PATH must be set in .env}:/home/elyoraa/.config/devin
       - devin-config:/var/lib/elyoraa/devin-config
       # Bind the host's `devin` binary into the container.
-      # Use the symlink path (e.g. /usr/local/bin/devin) rather than a
-      # version-pinned path so the mount survives host upgrades.
       - ${DEVIN_BIN_HOST_PATH:-/usr/local/bin/devin}:/usr/local/bin/devin:ro
     env_file: .env
     secrets:
