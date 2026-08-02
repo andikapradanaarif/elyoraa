@@ -50,6 +50,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	eventType := r.Header.Get("X-GitHub-Event")
 	deliveryID := r.Header.Get("X-GitHub-Delivery")
 
+	// GitHub sends a ping event when the webhook is first configured.
+	// Respond with 200 so GitHub marks the webhook as active.
+	if eventType == "ping" {
+		slog.Info("webhook ping received", "delivery", deliveryID)
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
 	ctx := usecase.WithDeliveryID(r.Context(), deliveryID)
 	ctx = usecase.WithEventType(ctx, eventType)
 
