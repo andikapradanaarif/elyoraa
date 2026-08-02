@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-// Review represents a PR review job.
+// Review represents a PR review or issue analysis job.
 type Review struct {
 	JobKey           string
 	DeliveryID       string
@@ -18,6 +18,8 @@ type Review struct {
 	Author           string
 	Title            string
 	Body             string
+	Type             string // "review" (default) or "issue"
+	TriggerComment   string // the comment that triggered this job, if any
 	PendingCommentID int64 // issue comment ID for "Review in progress…"
 	EnqueuedAt       time.Time
 }
@@ -34,6 +36,11 @@ type Comment struct {
 type Output struct {
 	Summary  string    `json:"summary"`
 	Comments []Comment `json:"comments"`
+}
+
+// IsIssue reports whether this is an issue analysis job (not a PR review).
+func (r *Review) IsIssue() bool {
+	return r.Type == "issue"
 }
 
 // IsBot returns true if the author looks like a bot.

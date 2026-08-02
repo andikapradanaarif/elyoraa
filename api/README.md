@@ -28,7 +28,11 @@ make migrate-down
 
 The server listens on `PORT` (default `8080`) and exposes:
 
-- `POST /webhook/gh` — GitHub webhook endpoint. Listens for `pull_request` (`opened`, `reopened`, `ready_for_review`) and `issue_comment` (to request a rereview by mentioning the bot).
+- `POST /webhook/gh` — GitHub webhook endpoint. Listens for:
+  - `pull_request` (`opened`, `reopened`, `ready_for_review`) — auto-review.
+  - `issue_comment` — bot mention on PR triggers rereview; on issue triggers analysis.
+  - `pull_request_review` / `pull_request_review_comment` — bot mention triggers rereview.
+  - `issues` (`opened`, `edited`, `reopened`) — bot mention in issue body triggers analysis.
 - `GET /health` — liveness.
 - `GET /metrics` — Prometheus-style metrics.
 

@@ -76,6 +76,12 @@ func (u *WebhookUsecase) Handle(ctx context.Context, body []byte, signature stri
 		return u.handlePullRequest(ctx, deliveryID, body)
 	case "issue_comment":
 		return u.handleIssueComment(ctx, deliveryID, body)
+	case "pull_request_review":
+		return u.handlePullRequestReview(ctx, deliveryID, body)
+	case "pull_request_review_comment":
+		return u.handlePullRequestReviewComment(ctx, deliveryID, body)
+	case "issues":
+		return u.handleIssues(ctx, deliveryID, body)
 	default:
 		_ = u.store.Record(ctx, &domain.WebhookEvent{
 			DeliveryID: deliveryID,
@@ -186,13 +192,13 @@ func (u *WebhookUsecase) handleIssueComment(ctx context.Context, deliveryID stri
 	}
 
 	issue := cmEvent.GetIssue()
-	if issue == nil || !issue.IsPullRequest() {
+	if issue == nil {
 		_ = u.store.Record(ctx, u.commentWebhookEvent(deliveryID, cmEvent, body, "ignored", ""))
 		return domain.Review{}, nil
 	}
 
 	comment := cmEvent.GetComment()
-	if comment == nil || !u.isRereviewRequest(comment.GetBody()) {
+	if comment == nil || !u.isBotMentioned(comment.GetBody()) {
 		_ = u.store.Record(ctx, u.commentWebhookEvent(deliveryID, cmEvent, body, "ignored", ""))
 		return domain.Review{}, nil
 	}
@@ -210,62 +216,88 @@ func (u *WebhookUsecase) handleIssueComment(ctx context.Context, deliveryID stri
 	}
 	owner, repoName := ownerRepo[0], ownerRepo[1]
 
-	prNumber := issue.GetNumber()
+	issueNumber := issue.GetNumber()
 	instID := cmEvent.GetInstallation().GetID()
 
-	prCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	prInfo, err := u.gh.GetPR(prCtx, instID, owner, repoName, prNumber, 0, 0)
-	cancel()
-	if err != nil {
-		_ = u.store.Record(ctx, u.commentWebhookEvent(deliveryID, cmEvent, body, "failed", fmt.Sprintf("get pr: %v", err)))
-		return domain.Review{}, fmt.Errorf("get pr: %w", err)
+	// If the comment is on a PR, trigger a rereview.
+	if issue.IsPullRequest() {
+		prCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		prInfo, err := u.gh.GetPR(prCtx, instID, owner, repoName, issueNumber, 0, 0)
+		cancel()
+		if err != nil {
+			_ = u.store.Record(ctx, u.commentWebhookEvent(deliveryID, cmEvent, body, "failed", fmt.Sprintf("get pr: %v", err)))
+			return domain.Review{}, fmt.Errorf("get pr: %w", err)
+		}
+
+		if prInfo.IsDraft {
+			_ = u.store.Record(ctx, u.commentWebhookEvent(deliveryID, cmEvent, body, "ignored", ""))
+			return domain.Review{}, nil
+		}
+
+		review := domain.Review{
+			DeliveryID:     deliveryID,
+			Owner:          owner,
+			Repo:           repoName,
+			PRNumber:       issueNumber,
+			HeadSHA:        prInfo.HeadSHA,
+			BaseSHA:        prInfo.BaseSHA,
+			InstallationID: instID,
+			Author:         prInfo.Author,
+			Title:          prInfo.Title,
+			Body:           prInfo.Body,
+			TriggerComment: comment.GetBody(),
+			EnqueuedAt:     time.Now(),
+		}
+
+		return u.enqueueReview(ctx, review, u.commentWebhookEvent(deliveryID, cmEvent, body, "received", ""))
 	}
 
-	if prInfo.IsDraft {
-		_ = u.store.Record(ctx, u.commentWebhookEvent(deliveryID, cmEvent, body, "ignored", ""))
-		return domain.Review{}, nil
-	}
-
+	// Non-PR issue: trigger issue analysis.
 	review := domain.Review{
 		DeliveryID:     deliveryID,
 		Owner:          owner,
 		Repo:           repoName,
-		PRNumber:       prNumber,
-		HeadSHA:        prInfo.HeadSHA,
-		BaseSHA:        prInfo.BaseSHA,
+		PRNumber:       issueNumber,
 		InstallationID: instID,
-		Author:         prInfo.Author,
-		Title:          prInfo.Title,
-		Body:           prInfo.Body,
+		Author:         issue.GetUser().GetLogin(),
+		Title:          issue.GetTitle(),
+		Body:           issue.GetBody(),
+		Type:           "issue",
+		TriggerComment: comment.GetBody(),
 		EnqueuedAt:     time.Now(),
 	}
 
 	return u.enqueueReview(ctx, review, u.commentWebhookEvent(deliveryID, cmEvent, body, "received", ""))
 }
 
-// isRereviewRequest reports whether a comment is asking the bot to rereview a PR.
-func (u *WebhookUsecase) isRereviewRequest(body string) bool {
+// isBotMentioned reports whether a comment body mentions the bot handle.
+func (u *WebhookUsecase) isBotMentioned(body string) bool {
 	body = strings.ToLower(body)
 	handle := strings.ToLower(u.cfg.BotHandle)
-	if !strings.Contains(body, "@"+handle) && !strings.Contains(body, handle) {
+	return strings.Contains(body, "@"+handle) || strings.Contains(body, handle)
+}
+
+// isRereviewRequest reports whether a comment is asking the bot to rereview a PR.
+func (u *WebhookUsecase) isRereviewRequest(body string) bool {
+	if !u.isBotMentioned(body) {
 		return false
 	}
-	return strings.Contains(body, "rereview") ||
-		strings.Contains(body, "re-review") ||
-		strings.Contains(body, "review again") ||
-		strings.Contains(body, "recheck") ||
-		strings.Contains(body, "check again")
+	return true
 }
 
 func (u *WebhookUsecase) enqueueReview(ctx context.Context, review domain.Review, evt *domain.WebhookEvent) (domain.Review, error) {
 	if review.IsBot() {
-		_ = u.store.Record(ctx, evt)
+		if evt != nil {
+			_ = u.store.Record(ctx, evt)
+		}
 		return domain.Review{}, nil
 	}
 
 	review.JobKey = dedup.JobKey(review.Owner, review.Repo, review.PRNumber, review.HeadSHA)
 
-	_ = u.store.Record(ctx, evt)
+	if evt != nil {
+		_ = u.store.Record(ctx, evt)
+	}
 
 	ctx, job, ok := u.d.TryStart(ctx, review)
 	if !ok {
@@ -353,4 +385,219 @@ func (u *WebhookUsecase) commentWebhookEvent(deliveryID string, cmEvent *go_gith
 		evt.PRNumber = issue.GetNumber()
 	}
 	return evt
+}
+
+func (u *WebhookUsecase) handlePullRequestReview(ctx context.Context, deliveryID string, body []byte) (domain.Review, error) {
+	event, err := go_github.ParseWebHook("pull_request_review", body)
+	if err != nil {
+		_ = u.store.Record(ctx, &domain.WebhookEvent{
+			DeliveryID: deliveryID, EventType: "pull_request_review",
+			Status: "failed", Error: fmt.Sprintf("parse: %v", err), ReceivedAt: time.Now(),
+		})
+		return domain.Review{}, fmt.Errorf("parse: %w", err)
+	}
+
+	rvEvent, ok := event.(*go_github.PullRequestReviewEvent)
+	if !ok {
+		_ = u.store.Record(ctx, &domain.WebhookEvent{
+			DeliveryID: deliveryID, EventType: "pull_request_review",
+			Status: "ignored", ReceivedAt: time.Now(),
+		})
+		return domain.Review{}, nil
+	}
+
+	action := rvEvent.GetAction()
+	if action != "submitted" && action != "edited" {
+		_ = u.store.Record(ctx, &domain.WebhookEvent{
+			DeliveryID: deliveryID, EventType: "pull_request_review",
+			Action: action, Status: "ignored", Payload: body, ReceivedAt: time.Now(),
+		})
+		return domain.Review{}, nil
+	}
+
+	review := rvEvent.GetReview()
+	if review == nil || !u.isBotMentioned(review.GetBody()) {
+		_ = u.store.Record(ctx, &domain.WebhookEvent{
+			DeliveryID: deliveryID, EventType: "pull_request_review",
+			Action: action, Status: "ignored", Payload: body, ReceivedAt: time.Now(),
+		})
+		return domain.Review{}, nil
+	}
+
+	pr := rvEvent.GetPullRequest()
+	repo := rvEvent.GetRepo()
+	if pr == nil || repo == nil || repo.GetFullName() == "" {
+		return domain.Review{}, fmt.Errorf("missing pr or repo")
+	}
+
+	ownerRepo := strings.SplitN(repo.GetFullName(), "/", 2)
+	owner, repoName := ownerRepo[0], ownerRepo[1]
+	instID := rvEvent.GetInstallation().GetID()
+
+	if pr.GetDraft() {
+		return domain.Review{}, nil
+	}
+
+	r := domain.Review{
+		DeliveryID:     deliveryID,
+		Owner:          owner,
+		Repo:           repoName,
+		PRNumber:       pr.GetNumber(),
+		HeadSHA:        pr.GetHead().GetSHA(),
+		BaseSHA:        pr.GetBase().GetSHA(),
+		InstallationID: instID,
+		Author:         pr.GetUser().GetLogin(),
+		Title:          pr.GetTitle(),
+		Body:           pr.GetBody(),
+		TriggerComment: review.GetBody(),
+		EnqueuedAt:     time.Now(),
+	}
+
+	_ = u.store.Record(ctx, &domain.WebhookEvent{
+		DeliveryID: deliveryID, EventType: "pull_request_review",
+		Action: action, Owner: owner, Repo: repoName, PRNumber: pr.GetNumber(),
+		Status: "received", Payload: body, ReceivedAt: time.Now(),
+	})
+	return u.enqueueReview(ctx, r, nil)
+}
+
+func (u *WebhookUsecase) handlePullRequestReviewComment(ctx context.Context, deliveryID string, body []byte) (domain.Review, error) {
+	event, err := go_github.ParseWebHook("pull_request_review_comment", body)
+	if err != nil {
+		_ = u.store.Record(ctx, &domain.WebhookEvent{
+			DeliveryID: deliveryID, EventType: "pull_request_review_comment",
+			Status: "failed", Error: fmt.Sprintf("parse: %v", err), ReceivedAt: time.Now(),
+		})
+		return domain.Review{}, fmt.Errorf("parse: %w", err)
+	}
+
+	rcEvent, ok := event.(*go_github.PullRequestReviewCommentEvent)
+	if !ok {
+		_ = u.store.Record(ctx, &domain.WebhookEvent{
+			DeliveryID: deliveryID, EventType: "pull_request_review_comment",
+			Status: "ignored", ReceivedAt: time.Now(),
+		})
+		return domain.Review{}, nil
+	}
+
+	action := rcEvent.GetAction()
+	if action != "created" && action != "edited" {
+		_ = u.store.Record(ctx, &domain.WebhookEvent{
+			DeliveryID: deliveryID, EventType: "pull_request_review_comment",
+			Action: action, Status: "ignored", Payload: body, ReceivedAt: time.Now(),
+		})
+		return domain.Review{}, nil
+	}
+
+	comment := rcEvent.GetComment()
+	if comment == nil || !u.isBotMentioned(comment.GetBody()) {
+		_ = u.store.Record(ctx, &domain.WebhookEvent{
+			DeliveryID: deliveryID, EventType: "pull_request_review_comment",
+			Action: action, Status: "ignored", Payload: body, ReceivedAt: time.Now(),
+		})
+		return domain.Review{}, nil
+	}
+
+	pr := rcEvent.GetPullRequest()
+	repo := rcEvent.GetRepo()
+	if pr == nil || repo == nil || repo.GetFullName() == "" {
+		return domain.Review{}, fmt.Errorf("missing pr or repo")
+	}
+
+	ownerRepo := strings.SplitN(repo.GetFullName(), "/", 2)
+	owner, repoName := ownerRepo[0], ownerRepo[1]
+	instID := rcEvent.GetInstallation().GetID()
+
+	if pr.GetDraft() {
+		return domain.Review{}, nil
+	}
+
+	r := domain.Review{
+		DeliveryID:     deliveryID,
+		Owner:          owner,
+		Repo:           repoName,
+		PRNumber:       pr.GetNumber(),
+		HeadSHA:        pr.GetHead().GetSHA(),
+		BaseSHA:        pr.GetBase().GetSHA(),
+		InstallationID: instID,
+		Author:         pr.GetUser().GetLogin(),
+		Title:          pr.GetTitle(),
+		Body:           pr.GetBody(),
+		TriggerComment: comment.GetBody(),
+		EnqueuedAt:     time.Now(),
+	}
+
+	_ = u.store.Record(ctx, &domain.WebhookEvent{
+		DeliveryID: deliveryID, EventType: "pull_request_review_comment",
+		Action: action, Owner: owner, Repo: repoName, PRNumber: pr.GetNumber(),
+		Status: "received", Payload: body, ReceivedAt: time.Now(),
+	})
+	return u.enqueueReview(ctx, r, nil)
+}
+
+func (u *WebhookUsecase) handleIssues(ctx context.Context, deliveryID string, body []byte) (domain.Review, error) {
+	event, err := go_github.ParseWebHook("issues", body)
+	if err != nil {
+		_ = u.store.Record(ctx, &domain.WebhookEvent{
+			DeliveryID: deliveryID, EventType: "issues",
+			Status: "failed", Error: fmt.Sprintf("parse: %v", err), ReceivedAt: time.Now(),
+		})
+		return domain.Review{}, fmt.Errorf("parse: %w", err)
+	}
+
+	isEvent, ok := event.(*go_github.IssuesEvent)
+	if !ok {
+		_ = u.store.Record(ctx, &domain.WebhookEvent{
+			DeliveryID: deliveryID, EventType: "issues",
+			Status: "ignored", ReceivedAt: time.Now(),
+		})
+		return domain.Review{}, nil
+	}
+
+	action := isEvent.GetAction()
+	if action != "opened" && action != "edited" && action != "reopened" {
+		_ = u.store.Record(ctx, &domain.WebhookEvent{
+			DeliveryID: deliveryID, EventType: "issues",
+			Action: action, Status: "ignored", Payload: body, ReceivedAt: time.Now(),
+		})
+		return domain.Review{}, nil
+	}
+
+	issue := isEvent.GetIssue()
+	if issue == nil || !u.isBotMentioned(issue.GetBody()) {
+		_ = u.store.Record(ctx, &domain.WebhookEvent{
+			DeliveryID: deliveryID, EventType: "issues",
+			Action: action, Status: "ignored", Payload: body, ReceivedAt: time.Now(),
+		})
+		return domain.Review{}, nil
+	}
+
+	repo := isEvent.GetRepo()
+	if repo == nil || repo.GetFullName() == "" {
+		return domain.Review{}, fmt.Errorf("missing repository")
+	}
+
+	ownerRepo := strings.SplitN(repo.GetFullName(), "/", 2)
+	owner, repoName := ownerRepo[0], ownerRepo[1]
+	instID := isEvent.GetInstallation().GetID()
+
+	r := domain.Review{
+		DeliveryID:     deliveryID,
+		Owner:          owner,
+		Repo:           repoName,
+		PRNumber:       issue.GetNumber(),
+		InstallationID: instID,
+		Author:         issue.GetUser().GetLogin(),
+		Title:          issue.GetTitle(),
+		Body:           issue.GetBody(),
+		Type:           "issue",
+		EnqueuedAt:     time.Now(),
+	}
+
+	_ = u.store.Record(ctx, &domain.WebhookEvent{
+		DeliveryID: deliveryID, EventType: "issues",
+		Action: action, Owner: owner, Repo: repoName, PRNumber: issue.GetNumber(),
+		Status: "received", Payload: body, ReceivedAt: time.Now(),
+	})
+	return u.enqueueReview(ctx, r, nil)
 }

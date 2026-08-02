@@ -57,11 +57,20 @@ The image is Debian-based because a host-provided `devin` binary is usually glib
 ## Review flow
 
 - Repositories must be pre-cloned as bare clones at `WORKSPACE_BASE/{owner}/{repo}.git`. The bot does not clone on demand; if a repo is not cloned, the review is skipped with a comment.
-- Webhook events: `pull_request` (`opened`, `reopened`, `ready_for_review`) and `issue_comment` (rereview by mention).
+- Webhook events:
+  - `pull_request` (`opened`, `reopened`, `ready_for_review`) — auto-review.
+  - `issue_comment` — if the comment mentions the bot on a PR, trigger rereview; if on an issue, trigger issue analysis.
+  - `pull_request_review` (`submitted`, `edited`) — if the review body mentions the bot, trigger rereview.
+  - `pull_request_review_comment` (`created`, `edited`) — if the comment mentions the bot, trigger rereview.
+  - `issues` (`opened`, `edited`, `reopened`) — if the issue body mentions the bot, trigger issue analysis.
+- Draft PRs and `synchronize` pushes are ignored.
+- Issue analysis spawns Devin without a worktree and posts the response as an issue comment.
+- Rereview is triggered by any mention of the bot handle (`BOT_HANDLE`, default `elyoraa`).
 - Draft PRs and `synchronize` pushes are ignored.
 - Rereview is triggered by a PR comment mentioning the bot handle (`BOT_HANDLE`, default `elyoraa`) with a rereview keyword (`rereview`, `re-review`, `review again`, `recheck`, `check again`).
 - The Devin model is configurable via `DEVIN_MODEL` (default `swe-1.7`) and passed with `--model`.
 - If the review output has no comments, the bot approves the PR; otherwise it requests changes.
+- Issue analysis uses `prompts/issue.md`; PR review uses `prompts/review.md`.
 
 ## Architecture
 

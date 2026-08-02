@@ -68,6 +68,10 @@ func (r *ReviewUsecase) Process(ctx context.Context, j domain.Review) (err error
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 
+	if j.IsIssue() {
+		return r.processIssue(ctx, &j)
+	}
+
 	token, err := r.gh.InstallationToken(ctx, j.InstallationID)
 	if err != nil {
 		r.updatePending(ctx, &j, "Review failed: could not authenticate to GitHub.")
@@ -188,6 +192,90 @@ func (r *ReviewUsecase) markFailed(ctx context.Context, j domain.Review, msg str
 	if r.store != nil && j.DeliveryID != "" {
 		_ = r.store.UpdateStatus(ctx, j.DeliveryID, "failed", msg)
 	}
+}
+
+// processIssue handles an issue analysis job: spawn Devin to analyze the issue
+// and post the response as a comment.
+func (r *ReviewUsecase) processIssue(ctx context.Context, j *domain.Review) error {
+	pendingBody := "Analyzing issue…\n\n<!-- elyoraa-in-progress -->"
+	pendingCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	commentID, err := r.gh.PostPendingComment(pendingCtx, j.InstallationID, j.Owner, j.Repo, j.PRNumber, pendingBody)
+	cancel()
+	if err != nil {
+		slog.Warn("failed to post pending comment", "error", err)
+	} else {
+		j.PendingCommentID = commentID
+	}
+
+	prompt, err := r.renderIssuePrompt(j)
+	if err != nil {
+		r.updatePending(ctx, j, "Issue analysis failed: could not render prompt.")
+		r.markFailed(ctx, *j, "render issue prompt")
+		return fmt.Errorf("render issue prompt: %w", err)
+	}
+
+	// Run Devin in a temp dir (no worktree needed for issue analysis).
+	tmpDir, err := os.MkdirTemp("", "elyoraa-issue-*")
+	if err != nil {
+		r.updatePending(ctx, j, "Issue analysis failed: internal error.")
+		r.markFailed(ctx, *j, "mkdir temp")
+		return fmt.Errorf("mkdir temp: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	out, err := r.runDevin(ctx, tmpDir, prompt)
+	if err != nil {
+		if ctx.Err() == context.Canceled {
+			r.updatePending(ctx, j, "Issue analysis cancelled.")
+			r.markStatus(ctx, *j, "cancelled")
+			return nil
+		}
+		r.updatePending(ctx, j, "Issue analysis failed: Devin run failed.")
+		r.markFailed(ctx, *j, "run devin issue")
+		return fmt.Errorf("run devin issue: %w", err)
+	}
+
+	// Post the raw output as an issue comment.
+	response := strings.TrimSpace(out)
+	if response == "" {
+		response = "No output from analysis."
+	}
+
+	if j.PendingCommentID != 0 {
+		editCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_ = r.gh.EditComment(editCtx, j.InstallationID, j.Owner, j.Repo, j.PendingCommentID, response+"\n\n<!-- elyoraa-in-progress -->")
+		cancel()
+	} else {
+		postCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_, _ = r.gh.PostPendingComment(postCtx, j.InstallationID, j.Owner, j.Repo, j.PRNumber, response)
+		cancel()
+	}
+
+	r.markStatus(ctx, *j, "completed")
+	return nil
+}
+
+func (r *ReviewUsecase) renderIssuePrompt(j *domain.Review) (string, error) {
+	tmpl, err := template.ParseFiles(filepath.Join(r.cfg.PromptsDir, "issue.md"))
+	if err != nil {
+		return "", err
+	}
+
+	data := map[string]any{
+		"Owner":          j.Owner,
+		"Repo":           j.Repo,
+		"IssueNumber":    j.PRNumber,
+		"Title":          j.Title,
+		"Body":           j.Body,
+		"TriggerComment": j.TriggerComment,
+		"BotHandle":      r.cfg.BotHandle,
+	}
+
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, data); err != nil {
+		return "", err
+	}
+	return buf.String(), nil
 }
 
 func (r *ReviewUsecase) markStatus(ctx context.Context, j domain.Review, status string) {
