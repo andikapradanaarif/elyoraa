@@ -25,12 +25,13 @@ Add a multi-turn chat web service to `elyoraa` so an authenticated user can ask 
 
 `elyoraa` already:
 
-- Spawns `devin` non-interactively from Go (`internal/reviewer/reviewer.go`).
-- Has a `queue.Backend` interface with in-memory and BoltDB backends.
-- Clones PR repos into bare caches and per-PR worktrees.
-- Generates a locked Devin config to deny dangerous tools in review mode.
+- Spawns `devin` non-interactively from Go (`internal/usecase/review.go`).
+- Has a `queue.Backend` interface with in-memory and BoltDB backends in `internal/repository/queue`.
+- Maintains pre-cloned bare repos in `internal/repository/cache` and creates per-PR worktrees.
+- Generates a locked Devin config in `DEVIN_CONFIG_DIR` to deny dangerous tools in review mode.
+- Uses a layered architecture: `cmd/server`, `internal/handler`, `internal/usecase`, `internal/repository`, and `migration`.
 
-The new chat engine builds on these pieces but needs a different permission model (to actually run deployments) and a persistence layer for conversation state.
+The new chat engine builds on these pieces but needs a different permission model (to actually run deployments), an auth layer, a web UI, and a persistence layer for conversation state.
 
 ## Architecture
 

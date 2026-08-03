@@ -380,6 +380,7 @@ func (r *ReviewUsecase) runDevin(ctx context.Context, worktree, prompt string) (
 	}
 
 	cmd := exec.CommandContext(ctx, r.cfg.DevinBin,
+		"-p",
 		"--sandbox",
 		"--permission-mode", "autonomous",
 		"--model", r.cfg.DevinModel,
