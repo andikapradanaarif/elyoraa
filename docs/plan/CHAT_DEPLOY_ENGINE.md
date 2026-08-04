@@ -7,7 +7,7 @@ Add a multi-turn chat web service to `elyoraa` so an authenticated user can ask 
 ## Goals
 
 - Multi-turn chat with Devin CLI, optionally in the context of a checked-out GitHub repo.
-- Per-room permission mode: `autonomous` (sandboxed), `bypass` (dangerous but explicit), or a fixed allow-list.
+- Per-room permission mode: `dangerous` (bypass, auto-approves all tools), `smart` (auto-approves safe actions), or `accept-edits` (auto-approves workspace edits only). Permission rules in the Devin config still apply on top of the mode (deny rules always win).
 - Devin can run deployment commands (`docker compose`, `kubectl`, `helm`, etc.) inside the room workspace or general server commands when no repo is attached.
 - Users must register and be verified (email/invite) before they can log in.
 - The service serves a web UI for chat and room management.
@@ -127,7 +127,7 @@ CREATE TABLE chat_rooms (
     repo TEXT,             -- optional GitHub repo
     branch TEXT,           -- optional
     sha TEXT,              -- optional
-    permission_mode TEXT NOT NULL DEFAULT 'autonomous',
+    permission_mode TEXT NOT NULL DEFAULT 'dangerous',
     workspace_path TEXT NOT NULL UNIQUE,
     devin_session_id TEXT,
     agent_status TEXT NOT NULL DEFAULT 'idle',  -- idle, processing, error, done
@@ -225,7 +225,7 @@ All JSON API endpoints require authentication via session cookie or bearer token
   - Returns the chat web UI (`internal/ui` static assets).
 
 - `POST /chat/rooms`
-  - Body: `{ "name": "...", "owner": "..." (optional), "repo": "..." (optional), "branch": "..." (optional), "sha": "..." (optional), "permission_mode": "autonomous" }`
+  - Body: `{ "name": "...", "owner": "..." (optional), "repo": "..." (optional), "branch": "..." (optional), "sha": "..." (optional), "permission_mode": "dangerous" }`
   - Creates a room. If `owner` and `repo` are present, the room expects a pre-cloned bare repo at `WORKSPACE_BASE/{owner}/{repo}.git` and adds a worktree at `WORKSPACE_BASE/chat/{room_id}`; the request fails with a clear error if the bare clone is missing. Otherwise the workspace is an empty general-purpose directory.
 
 - `POST /chat/rooms/{id}/messages`
@@ -297,7 +297,7 @@ Use `devin --sandbox --permission-mode autonomous` with an allow-list tuned for 
 
 ### `bypass` (explicit opt-in only)
 
-Use `devin --permission-mode bypass` with no deny list. This allows arbitrary shell commands as the service user. A room must be created with `permission_mode: bypass` and the caller must explicitly accept the risk. All `bypass` runs are logged with room ID, user, prompt, and output.
+Use `devin --permission-mode dangerous` with no deny list. This allows arbitrary shell commands as the service user. A room must be created with `permission_mode: dangerous` and the caller must explicitly accept the risk. All `dangerous` runs are logged with room ID, user, prompt, and output.
 
 ### `normal` (fixed allow-list)
 
