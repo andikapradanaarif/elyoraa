@@ -19,6 +19,7 @@ type Config struct {
 	DevinBin                string
 	DevinConfigDir          string
 	DevinModel              string
+	DevinPermissionMode     string
 	PromptsDir              string
 	BotHandle               string
 	TokenDir                string
@@ -51,6 +52,7 @@ func Load() (*Config, error) {
 		DevinBin:              getEnv("DEVIN_BIN", "devin"),
 		DevinConfigDir:        getEnv("DEVIN_CONFIG_DIR", "/var/lib/elyoraa/devin-config"),
 		DevinModel:            getEnv("DEVIN_MODEL", "swe-1.7"),
+		DevinPermissionMode:   getEnv("DEVIN_PERMISSION_MODE", "auto"),
 		PromptsDir:            getEnv("PROMPTS_DIR", "/app/prompts"),
 		BotHandle:             getEnv("BOT_HANDLE", "elyoraa"),
 		TokenDir:              getEnv("ELYORAA_TOKEN_DIR", "/var/lib/elyoraa/tokens"),
