@@ -141,14 +141,14 @@ func (r *ReviewUsecase) Process(ctx context.Context, j domain.Review) (err error
 		return fmt.Errorf("parse output: %w", err)
 	}
 
-	// Map comments to positions. Drop unmappable comments into the summary.
+	// Map comments to lines. Drop unmappable comments into the summary.
 	fileComments := r.gh.MapCommentsToPositions(prInfo.Files, review.Comments)
 	dropped := make([]domain.Comment, 0)
 	used := make(map[string]bool)
 	for _, c := range review.Comments {
 		k := fmt.Sprintf("%s:%d", c.Path, c.Line)
 		for _, fc := range fileComments {
-			if fmt.Sprintf("%s:%d", fc.Path, fc.Position) == k { // approximate
+			if fmt.Sprintf("%s:%d", fc.Path, fc.Line) == k {
 				used[k] = true
 				break
 			}

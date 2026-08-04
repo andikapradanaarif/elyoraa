@@ -198,13 +198,14 @@ func (c *Client) PostReview(ctx context.Context, installationID int64, owner, re
 
 	draftComments := make([]*go_github.DraftReviewComment, 0, len(comments))
 	for _, cm := range comments {
-		if cm.Position < 1 {
+		if cm.Line < 1 {
 			continue
 		}
 		draftComments = append(draftComments, &go_github.DraftReviewComment{
-			Path:     go_github.String(cm.Path),
-			Position: go_github.Int(cm.Position),
-			Body:     go_github.String(cm.Body),
+			Path: go_github.String(cm.Path),
+			Line: go_github.Int(cm.Line),
+			Side: go_github.String("RIGHT"),
+			Body: go_github.String(cm.Body),
 		})
 	}
 
@@ -220,11 +221,11 @@ func (c *Client) PostReview(ctx context.Context, installationID int64, owner, re
 	return nil
 }
 
-// FileComment is a comment mapped to a diff position.
+// FileComment is a comment mapped to a diff line.
 type FileComment struct {
-	Path     string
-	Position int
-	Body     string
+	Path string
+	Line int
+	Body string
 }
 
 // PostPendingComment posts a temporary "Review in progress…" issue comment.
@@ -259,26 +260,25 @@ func (c *Client) DeleteComment(ctx context.Context, installationID int64, owner,
 
 // MapCommentsToPositions maps review comments (path+new line) to GitHub diff positions.
 func (c *Client) MapCommentsToPositions(files []*FileInfo, comments []domain.Comment) []FileComment {
-	positions := buildPositionMap(files)
+	lineSet := buildLineSet(files)
 	out := make([]FileComment, 0, len(comments))
 	for _, cm := range comments {
 		key := positionKey{path: cm.Path, line: cm.Line}
-		pos, ok := positions[key]
-		if !ok {
+		if !lineSet[key] {
 			continue
 		}
 		out = append(out, FileComment{
-			Path:     cm.Path,
-			Position: pos,
-			Body:     fmt.Sprintf("**%s**: %s", strings.ToUpper(cm.Severity), cm.Body),
+			Path: cm.Path,
+			Line: cm.Line,
+			Body: fmt.Sprintf("**%s**: %s", strings.ToUpper(cm.Severity), cm.Body),
 		})
 	}
-	// Sort by path then position for deterministic output.
+	// Sort by path then line for deterministic output.
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Path != out[j].Path {
 			return out[i].Path < out[j].Path
 		}
-		return out[i].Position < out[j].Position
+		return out[i].Line < out[j].Line
 	})
 	return out
 }
@@ -288,37 +288,33 @@ type positionKey struct {
 	line int
 }
 
-func buildPositionMap(files []*FileInfo) map[positionKey]int {
-	m := make(map[positionKey]int)
+// buildLineSet returns the set of (path, line) pairs that exist in the
+// diff's new side. A comment can be posted on any of these lines using
+// the Side+Line form.
+func buildLineSet(files []*FileInfo) map[positionKey]bool {
+	m := make(map[positionKey]bool)
 	for _, f := range files {
 		if f.Patch == "" {
 			continue
 		}
 		newLine := 0
-		pos := 0
 		lines := strings.Split(f.Patch, "\n")
 		inHunk := false
 		for _, line := range lines {
 			if strings.HasPrefix(line, "@@") {
 				inHunk = true
-				// Parse hunk header: @@ -oldStart,oldCount +newStart,newCount @@
 				newLine, _ = parseHunkNewStart(line)
-				pos++
 				continue
 			}
-			if !inHunk {
+			if !inHunk || line == "" {
 				continue
 			}
-			if line == "" {
-				continue
-			}
-			pos++
 			switch {
 			case strings.HasPrefix(line, "+"):
-				m[positionKey{path: f.Path, line: newLine}] = pos
+				m[positionKey{path: f.Path, line: newLine}] = true
 				newLine++
 			case strings.HasPrefix(line, " "):
-				m[positionKey{path: f.Path, line: newLine}] = pos
+				m[positionKey{path: f.Path, line: newLine}] = true
 				newLine++
 			case strings.HasPrefix(line, "-"):
 				// removed line, no new line number
