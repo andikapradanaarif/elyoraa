@@ -205,7 +205,6 @@ func (c *Client) PostReview(ctx context.Context, installationID int64, owner, re
 			Path:     go_github.String(cm.Path),
 			Position: go_github.Int(cm.Position),
 			Body:     go_github.String(cm.Body),
-			Side:     go_github.String("RIGHT"),
 		})
 	}
 
