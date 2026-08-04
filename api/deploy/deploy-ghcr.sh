@@ -51,7 +51,11 @@ echo "Logging in to GitHub Container Registry..."
 
 if [ -z "${GHCR_TOKEN:-}" ]; then
   printf 'Enter your GitHub Personal Access Token (with write:packages scope): '
+  # Hide typed input so the token is not printed to the terminal.
+  stty -echo
   read -r GHCR_TOKEN
+  stty echo
+  printf '\n'
 fi
 
 if ! echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_USER" --password-stdin; then
