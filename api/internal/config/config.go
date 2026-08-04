@@ -52,7 +52,7 @@ func Load() (*Config, error) {
 		DevinBin:              getEnv("DEVIN_BIN", "devin"),
 		DevinConfigDir:        getEnv("DEVIN_CONFIG_DIR", "/var/lib/elyoraa/devin-config"),
 		DevinModel:            getEnv("DEVIN_MODEL", "swe-1.7"),
-		DevinPermissionMode:   getEnv("DEVIN_PERMISSION_MODE", "auto"),
+		DevinPermissionMode:   getEnv("DEVIN_PERMISSION_MODE", "dangerous"),
 		PromptsDir:            getEnv("PROMPTS_DIR", "/app/prompts"),
 		BotHandle:             getEnv("BOT_HANDLE", "elyoraa"),
 		TokenDir:              getEnv("ELYORAA_TOKEN_DIR", "/var/lib/elyoraa/tokens"),
