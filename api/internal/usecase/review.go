@@ -159,6 +159,20 @@ func (r *ReviewUsecase) Process(ctx context.Context, j domain.Review) (err error
 	}
 
 	summary := review.Summary
+	{
+		var sb strings.Builder
+		sb.WriteString(summary)
+		if len(review.PassesCompleted) > 0 {
+			sb.WriteString(fmt.Sprintf("\n\n_Review passes completed: %s_", strings.Join(review.PassesCompleted, ", ")))
+		}
+		if len(review.FilesReviewed) > 0 {
+			sb.WriteString(fmt.Sprintf("\n_Files reviewed: %d_", len(review.FilesReviewed)))
+		}
+		if review.HighSeveritySweep != "" {
+			sb.WriteString(fmt.Sprintf("\n_High-severity sweep: %s_", review.HighSeveritySweep))
+		}
+		summary = sb.String()
+	}
 	if len(dropped) > 0 {
 		var sb strings.Builder
 		sb.WriteString(summary)

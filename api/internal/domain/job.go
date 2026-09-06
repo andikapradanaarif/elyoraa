@@ -41,9 +41,12 @@ type FollowUp struct {
 
 // Output is the parsed Devin review output.
 type Output struct {
-	Summary   string     `json:"summary"`
-	Comments  []Comment  `json:"comments"`
-	FollowUps []FollowUp `json:"follow_ups"`
+	Summary           string     `json:"summary"`
+	PassesCompleted   []string   `json:"passes_completed"`
+	FilesReviewed     []string   `json:"files_reviewed"`
+	HighSeveritySweep string     `json:"high_severity_sweep"`
+	Comments          []Comment  `json:"comments"`
+	FollowUps         []FollowUp `json:"follow_ups"`
 }
 
 // IsIssue reports whether this is an issue analysis job (not a PR review).
