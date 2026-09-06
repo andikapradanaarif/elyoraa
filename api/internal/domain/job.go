@@ -21,7 +21,7 @@ type Review struct {
 	Type             string // "review" (default) or "issue"
 	TriggerComment   string // the comment that triggered this job, if any
 	RepoAvailable    bool   // whether the repo was cloned and available for analysis
-	PendingCommentID int64 // issue comment ID for "Review in progress…"
+	PendingCommentID int64  // issue comment ID for "Review in progress…"
 	EnqueuedAt       time.Time
 }
 
@@ -33,10 +33,17 @@ type Comment struct {
 	Body     string `json:"body"`
 }
 
+// FollowUp is an out-of-scope improvement suggested as a separate GitHub issue.
+type FollowUp struct {
+	Title       string `json:"title"`
+	Description string `json:"description"`
+}
+
 // Output is the parsed Devin review output.
 type Output struct {
-	Summary  string    `json:"summary"`
-	Comments []Comment `json:"comments"`
+	Summary   string     `json:"summary"`
+	Comments  []Comment  `json:"comments"`
+	FollowUps []FollowUp `json:"follow_ups"`
 }
 
 // IsIssue reports whether this is an issue analysis job (not a PR review).

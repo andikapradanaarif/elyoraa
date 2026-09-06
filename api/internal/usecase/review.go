@@ -169,6 +169,16 @@ func (r *ReviewUsecase) Process(ctx context.Context, j domain.Review) (err error
 		summary = sb.String()
 	}
 
+	if len(review.FollowUps) > 0 {
+		var sb strings.Builder
+		sb.WriteString(summary)
+		sb.WriteString("\n\n### Suggested follow-up issues (out of scope for this PR)\n")
+		for _, f := range review.FollowUps {
+			sb.WriteString(fmt.Sprintf("- **%s** — %s\n", f.Title, f.Description))
+		}
+		summary = sb.String()
+	}
+
 	state := "APPROVE"
 	if len(review.Comments) > 0 {
 		state = "REQUEST_CHANGES"

@@ -34,13 +34,14 @@ The repository is **not cloned on this server**. You cannot search or read the c
 ## Instructions
 
 1. Read the issue carefully and understand what is being asked.
-2. {{if .RepoAvailable}}If the issue references specific code, search the repository for relevant files and understand the context.{{else}}Work with the information provided in the issue text.{{end}}
+2. {{if .RepoAvailable}}If the issue references specific code, search the repository for relevant files and understand the context. Check `go.mod`, `package.json`, or equivalent manifests to understand the stack before making recommendations.{{else}}Work with the information provided in the issue text.{{end}}
 3. Provide a thoughtful, actionable response:
    - If it's a bug report, suggest potential causes and fixes.
    - If it's a feature request, discuss feasibility and suggest an implementation approach.
    - If it's a question, answer it clearly.
 4. Keep your response concise and focused. Use code examples where helpful.
 5. Do not modify any files. This is analysis only — just provide your opinion in the response.
+6. Only suggest solutions that fit the repository's actual stack and dependencies. Do not recommend libraries or patterns the project doesn't use.
 
 ## Output
 
