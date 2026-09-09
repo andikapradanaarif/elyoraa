@@ -65,7 +65,7 @@ func (r *ReviewUsecase) Process(ctx context.Context, j domain.Review) (err error
 		r.metrics.IncReviewTotal()
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	ctx, cancel := context.WithTimeout(ctx, r.cfg.ReviewTimeout)
 	defer cancel()
 
 	if j.IsIssue() {
@@ -205,11 +205,11 @@ func (r *ReviewUsecase) Process(ctx context.Context, j domain.Review) (err error
 			slog.Info("cannot approve own PR, posting comment instead", "author", j.Author)
 			commentBody := "✅ **Review complete — no issues found.**\n\n" + summary
 			if j.PendingCommentID != 0 {
-				editCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				editCtx, cancel := context.WithTimeout(context.Background(), r.cfg.CommentTimeout)
 				_ = r.gh.EditComment(editCtx, j.InstallationID, j.Owner, j.Repo, j.PendingCommentID, commentBody)
 				cancel()
 			} else {
-				postCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				postCtx, cancel := context.WithTimeout(context.Background(), r.cfg.CommentTimeout)
 				_, _ = r.gh.PostPendingComment(postCtx, j.InstallationID, j.Owner, j.Repo, j.PRNumber, commentBody)
 				cancel()
 			}
@@ -241,7 +241,7 @@ func (r *ReviewUsecase) markFailed(ctx context.Context, j domain.Review, msg str
 // from the issue text alone and mentions that the repo isn't available.
 func (r *ReviewUsecase) processIssue(ctx context.Context, j *domain.Review) error {
 	pendingBody := "Analyzing issue…\n\n<!-- elyoraa-in-progress -->"
-	pendingCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	pendingCtx, cancel := context.WithTimeout(context.Background(), r.cfg.CommentTimeout)
 	commentID, err := r.gh.PostPendingComment(pendingCtx, j.InstallationID, j.Owner, j.Repo, j.PRNumber, pendingBody)
 	cancel()
 	if err != nil {
@@ -309,11 +309,11 @@ func (r *ReviewUsecase) processIssue(ctx context.Context, j *domain.Review) erro
 	}
 
 	if j.PendingCommentID != 0 {
-		editCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		editCtx, cancel := context.WithTimeout(context.Background(), r.cfg.CommentTimeout)
 		_ = r.gh.EditComment(editCtx, j.InstallationID, j.Owner, j.Repo, j.PendingCommentID, response+"\n\n<!-- elyoraa-in-progress -->")
 		cancel()
 	} else {
-		postCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		postCtx, cancel := context.WithTimeout(context.Background(), r.cfg.CommentTimeout)
 		_, _ = r.gh.PostPendingComment(postCtx, j.InstallationID, j.Owner, j.Repo, j.PRNumber, response)
 		cancel()
 	}
@@ -357,7 +357,7 @@ func (r *ReviewUsecase) updatePending(ctx context.Context, j *domain.Review, bod
 		return
 	}
 	body = body + "\n\n<!-- elyoraa-in-progress -->"
-	ctx2, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx2, cancel := context.WithTimeout(context.Background(), r.cfg.CommentTimeout)
 	defer cancel()
 	_ = r.gh.EditComment(ctx2, j.InstallationID, j.Owner, j.Repo, j.PendingCommentID, body)
 }

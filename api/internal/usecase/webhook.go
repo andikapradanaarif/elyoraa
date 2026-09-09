@@ -240,7 +240,7 @@ func (u *WebhookUsecase) handleIssueComment(ctx context.Context, deliveryID stri
 
 	// If the comment is on a PR, trigger a rereview.
 	if issue.IsPullRequest() {
-		prCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		prCtx, cancel := context.WithTimeout(ctx, u.cfg.CommentTimeout)
 		prInfo, err := u.gh.GetPR(prCtx, instID, owner, repoName, issueNumber, 0, 0)
 		cancel()
 		if err != nil {
@@ -331,7 +331,7 @@ func (u *WebhookUsecase) enqueueReview(ctx context.Context, review domain.Review
 	// Post the in-progress comment if we don't already have one.
 	if job.PendingCommentID == 0 {
 		pendingBody := "Review in progress…\n\n<!-- elyoraa-in-progress -->"
-		pendingCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		pendingCtx, cancel := context.WithTimeout(context.Background(), u.cfg.CommentTimeout)
 		id, err := u.gh.PostPendingComment(pendingCtx, job.InstallationID, job.Owner, job.Repo, job.PRNumber, pendingBody)
 		cancel()
 		if err != nil {
@@ -344,7 +344,7 @@ func (u *WebhookUsecase) enqueueReview(ctx context.Context, review domain.Review
 	if !u.q.Submit(ctx, *job) {
 		slog.Warn("queue full, dropping job", "job", job.JobKey)
 		if job.PendingCommentID != 0 {
-			editCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			editCtx, cancel := context.WithTimeout(context.Background(), u.cfg.CommentTimeout)
 			_ = u.gh.EditComment(editCtx, job.InstallationID, job.Owner, job.Repo, job.PendingCommentID,
 				"Review queued, will run later.\n\n<!-- elyoraa-in-progress -->")
 			cancel()

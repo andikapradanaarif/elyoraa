@@ -102,9 +102,9 @@ func main() {
 	srv := &http.Server{
 		Addr:              ":" + cfg.Port,
 		Handler:           handler,
-		ReadTimeout:       10 * time.Second,
+		ReadTimeout:       cfg.HTTPReadTimeout,
 		ReadHeaderTimeout: 5 * time.Second,
-		WriteTimeout:      10 * time.Second,
+		WriteTimeout:      cfg.HTTPWriteTimeout,
 	}
 
 	go func() {

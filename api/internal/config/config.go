@@ -34,6 +34,10 @@ type Config struct {
 	MaxChangedFiles         int
 	LogLevel                string
 	MetricsPath             string
+	ReviewTimeout           time.Duration
+	CommentTimeout          time.Duration
+	HTTPReadTimeout         time.Duration
+	HTTPWriteTimeout        time.Duration
 }
 
 // Load reads configuration from environment variables and applies defaults.
@@ -67,6 +71,10 @@ func Load() (*Config, error) {
 		MaxChangedFiles:       getInt("MAX_CHANGED_FILES", 50),
 		LogLevel:              getEnv("LOG_LEVEL", "info"),
 		MetricsPath:           getEnv("METRICS_PATH", "/metrics"),
+		ReviewTimeout:         getDuration("REVIEW_TIMEOUT", 10*time.Minute),
+		CommentTimeout:        getDuration("COMMENT_TIMEOUT", 10*time.Second),
+		HTTPReadTimeout:       getDuration("HTTP_READ_TIMEOUT", 10*time.Second),
+		HTTPWriteTimeout:      getDuration("HTTP_WRITE_TIMEOUT", 10*time.Second),
 	}
 
 	appID, err := getInt64("GITHUB_APP_ID")
@@ -117,4 +125,16 @@ func getInt64(key string) (int64, error) {
 		return 0, fmt.Errorf("invalid: %w", err)
 	}
 	return n, nil
+}
+
+func getDuration(key string, def time.Duration) time.Duration {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return def
+	}
+	return d
 }
