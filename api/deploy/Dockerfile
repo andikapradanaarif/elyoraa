@@ -1,5 +1,5 @@
 # Build stage
-FROM golang:1.25-alpine AS builder
+FROM golang:1.27-alpine AS builder
 RUN apk add --no-cache git ca-certificates
 WORKDIR /build
 COPY go.mod go.sum ./
@@ -10,7 +10,7 @@ RUN CGO_ENABLED=0 go build -o /build/elyoraa ./cmd/server && \
 
 # Runtime stage
 # Use Debian slim because the host-provided `devin` binary is usually glibc-linked.
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 RUN apt-get update && \
     apt-get install -y --no-install-recommends git ca-certificates bubblewrap socat curl && \
     rm -rf /var/lib/apt/lists/*
