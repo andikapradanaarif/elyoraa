@@ -119,9 +119,9 @@ func TestQueueWithFileBackend(t *testing.T) {
 	}
 
 	var processed []string
-	q := NewWithBackend(1, ProcessorFunc(func(ctx context.Context, j domain.Review) error {
+	q := NewWithBackend(1, ProcessorFunc(func(ctx context.Context, j domain.Review) (int, error) {
 		processed = append(processed, j.JobKey)
-		return nil
+		return 1, nil
 	}), nil, b)
 
 	ctx, cancel := context.WithCancel(context.Background())

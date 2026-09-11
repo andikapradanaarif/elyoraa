@@ -14,7 +14,7 @@ Phase 1 MVP is implemented under `api/`:
 - Bare-clone cache + per-review worktrees.
 - GitHub App auth, webhook verification, PR fetch, and review posting.
 - Prompt rendering, Devin CLI runner, and JSON output parser.
-- Prometheus-style `/metrics`, `/health`, and `/webhook` endpoints.
+- Prometheus-style `/metrics`, `/health`, and `/webhook` endpoints; `GET /jobs` lists job outcomes and `POST /jobs/retry/{key}` re-enqueues a failed review.
 - Optional PostgreSQL webhook audit log.
 - Optional BoltDB-backed queue (`QUEUE_BACKEND=file`).
 - Layered `handler > usecase > repository` architecture.

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -38,6 +39,10 @@ type Config struct {
 	CommentTimeout          time.Duration
 	HTTPReadTimeout         time.Duration
 	HTTPWriteTimeout        time.Duration
+	DevinMaxRetries         int
+	DevinRetryBackoffs      []time.Duration
+	DevinAttemptTimeout     time.Duration
+	DevinPreflightCheck     bool
 }
 
 // Load reads configuration from environment variables and applies defaults.
@@ -75,6 +80,10 @@ func Load() (*Config, error) {
 		CommentTimeout:        getDuration("COMMENT_TIMEOUT", 10*time.Second),
 		HTTPReadTimeout:       getDuration("HTTP_READ_TIMEOUT", 10*time.Second),
 		HTTPWriteTimeout:      getDuration("HTTP_WRITE_TIMEOUT", 10*time.Second),
+		DevinMaxRetries:       getInt("DEVIN_MAX_RETRIES", 3),
+		DevinRetryBackoffs:    getDurationList("DEVIN_RETRY_BACKOFFS", []time.Duration{30 * time.Second, 2 * time.Minute, 5 * time.Minute}),
+		DevinAttemptTimeout:   getDuration("DEVIN_ATTEMPT_TIMEOUT", 0),
+		DevinPreflightCheck:   getBool("DEVIN_PREFLIGHT_CHECK", true),
 	}
 
 	appID, err := getInt64("GITHUB_APP_ID")
@@ -137,4 +146,36 @@ func getDuration(key string, def time.Duration) time.Duration {
 		return def
 	}
 	return d
+}
+
+func getDurationList(key string, def []time.Duration) []time.Duration {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	parts := strings.Split(v, ",")
+	out := make([]time.Duration, 0, len(parts))
+	for _, p := range parts {
+		d, err := time.ParseDuration(strings.TrimSpace(p))
+		if err != nil {
+			return def
+		}
+		out = append(out, d)
+	}
+	if len(out) == 0 {
+		return def
+	}
+	return out
+}
+
+func getBool(key string, def bool) bool {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return def
+	}
+	return b
 }

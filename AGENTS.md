@@ -51,7 +51,10 @@ The image is Debian-based because a host-provided `devin` binary is usually glib
 - mem0 is configured as a remote HTTP MCP server (`https://mcp.mem0.ai/mcp`) when `MEM0_API_KEY` is set. No Node.js required.
 - The Docker image includes a `HEALTHCHECK` that hits `GET /health`.
 - Set `DATABASE_URL` (optional) to enable the PostgreSQL webhook audit log.
-- Set `QUEUE_BACKEND=file` and `QUEUE_FILE_PATH` to use the BoltDB-backed queue.
+- Set `QUEUE_BACKEND=file` and `QUEUE_FILE_PATH` to use the BoltDB-backed queue. Job outcomes (status, error, attempts, payload) are persisted in the same file's `outcomes` bucket.
+- `GET /jobs` lists tracked jobs (`?status=failed` filters); `GET /jobs/{key}` shows one; `POST /jobs/retry/{key}` re-enqueues a job without a new webhook. Key format: `owner/repo/pr/headSHA`.
+- Devin invocations retry transient failures: `DEVIN_MAX_RETRIES` (default 3, i.e. 4 attempts), `DEVIN_RETRY_BACKOFFS` (default `30s,2m,5m`), `DEVIN_ATTEMPT_TIMEOUT` (default 0 = `REVIEW_TIMEOUT`), `DEVIN_PREFLIGHT_CHECK` (default true, runs `devin models list` before each attempt).
+- Timeout env vars: `REVIEW_TIMEOUT`, `COMMENT_TIMEOUT`, `HTTP_READ_TIMEOUT`, `HTTP_WRITE_TIMEOUT` (Go duration syntax, e.g. `10m`, `30s`).
 - The Devin auth spike is not yet implemented.
 
 ## Review flow

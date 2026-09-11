@@ -653,3 +653,53 @@ func (u *WebhookUsecase) handleIssues(ctx context.Context, deliveryID string, bo
 	})
 	return u.enqueueReview(ctx, r, nil)
 }
+
+// ErrJobNotFound is returned when a job key has no tracked record.
+var ErrJobNotFound = errors.New("job not found")
+
+// ListJobs returns all tracked job outcomes, most recently updated first.
+func (u *WebhookUsecase) ListJobs(ctx context.Context) []queue.JobRecord {
+	t := u.q.Tracker()
+	if t == nil {
+		return nil
+	}
+	return t.List(ctx)
+}
+
+// GetJob returns a single tracked job record by key.
+func (u *WebhookUsecase) GetJob(ctx context.Context, key string) (queue.JobRecord, bool) {
+	t := u.q.Tracker()
+	if t == nil {
+		return queue.JobRecord{}, false
+	}
+	return t.Get(ctx, key)
+}
+
+// RetryJob re-enqueues a previously tracked job (e.g. a failed review) so it
+// can be retriggered without waiting for a new GitHub webhook delivery.
+func (u *WebhookUsecase) RetryJob(ctx context.Context, key string) (domain.Review, error) {
+	rec, ok := u.GetJob(ctx, key)
+	if !ok || rec.Job.JobKey == "" {
+		return domain.Review{}, ErrJobNotFound
+	}
+
+	job := rec.Job
+	job.EnqueuedAt = time.Now()
+
+	newCtx, newJob, ok := u.d.TryStart(ctx, job)
+	if !ok {
+		return domain.Review{}, ErrDuplicate
+	}
+	if !u.q.Submit(newCtx, *newJob) {
+		u.d.Done(job.JobKey)
+		return domain.Review{}, ErrQueueFull
+	}
+	slog.Info("job retried",
+		"job", job.JobKey,
+		"delivery", job.DeliveryID,
+		"owner", job.Owner,
+		"repo", job.Repo,
+		"pr", job.PRNumber,
+	)
+	return *newJob, nil
+}

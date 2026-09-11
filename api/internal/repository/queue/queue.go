@@ -2,6 +2,7 @@ package queue
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 
@@ -9,15 +10,20 @@ import (
 	"github.com/andikapradanaarif/elyoraa/internal/metrics"
 )
 
-// Processor handles a single review job.
+// ErrJobCancelled is returned by a Processor when a job was superseded or
+// otherwise cancelled mid-flight. It is not a failure.
+var ErrJobCancelled = errors.New("job cancelled")
+
+// Processor handles a single review job. It returns the number of attempts
+// used so far (for jobs with internal retries) and an error, if any.
 type Processor interface {
-	Process(ctx context.Context, job domain.Review) error
+	Process(ctx context.Context, job domain.Review) (attempts int, err error)
 }
 
 // ProcessorFunc adapts a function to Processor.
-type ProcessorFunc func(ctx context.Context, job domain.Review) error
+type ProcessorFunc func(ctx context.Context, job domain.Review) (int, error)
 
-func (f ProcessorFunc) Process(ctx context.Context, job domain.Review) error {
+func (f ProcessorFunc) Process(ctx context.Context, job domain.Review) (int, error) {
 	return f(ctx, job)
 }
 
@@ -27,6 +33,7 @@ type Queue struct {
 	workers   int
 	processor Processor
 	metrics   *metrics.Registry
+	tracker   JobTracker
 }
 
 // New creates a queue with an in-memory backend.
@@ -41,7 +48,13 @@ func NewWithBackend(workers int, p Processor, m *metrics.Registry, b Backend) *Q
 		workers:   workers,
 		processor: p,
 		metrics:   m,
+		tracker:   NewJobTracker(b),
 	}
+}
+
+// Tracker returns the job outcome tracker backing this queue.
+func (q *Queue) Tracker() JobTracker {
+	return q.tracker
 }
 
 // Submit enqueues a job. Returns false if the queue is full and the job is dropped.
@@ -52,9 +65,20 @@ func (q *Queue) Submit(ctx context.Context, j domain.Review) bool {
 		}
 		return false
 	}
+	if q.tracker != nil {
+		q.tracker.Enqueued(ctx, j)
+	}
 	if q.metrics != nil {
 		q.metrics.IncQueueDepth()
 	}
+	slog.Info("job enqueued",
+		"job", j.JobKey,
+		"delivery", j.DeliveryID,
+		"owner", j.Owner,
+		"repo", j.Repo,
+		"pr", j.PRNumber,
+		"type", j.Type,
+	)
 	return true
 }
 
@@ -77,11 +101,27 @@ func (q *Queue) worker(ctx context.Context, id int) {
 			q.metrics.DecQueueDepth()
 			q.metrics.IncActiveReviews()
 		}
+		if q.tracker != nil {
+			q.tracker.Started(ctx, j)
+		}
+
+		log := slog.With(
+			"worker", id,
+			"job", j.JobKey,
+			"delivery", j.DeliveryID,
+			"owner", j.Owner,
+			"repo", j.Repo,
+			"pr", j.PRNumber,
+			"type", j.Type,
+		)
 
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
-					slog.Error("worker panic recovered", "worker", id, "job", j.JobKey, "panic", fmt.Sprintf("%v", r))
+					if q.tracker != nil {
+						q.tracker.Failed(ctx, j, 0, fmt.Errorf("panic: %v", r))
+					}
+					log.Error("worker panic recovered", "panic", fmt.Sprintf("%v", r))
 					if q.metrics != nil {
 						q.metrics.IncReviewErrors()
 					}
@@ -92,8 +132,23 @@ func (q *Queue) worker(ctx context.Context, id int) {
 				q.backend.MarkDone(ctx, j)
 			}()
 
-			if err := q.processor.Process(ctx, j); err != nil {
-				slog.Error("review failed", "worker", id, "job", j.JobKey, "error", err)
+			attempts, err := q.processor.Process(ctx, j)
+			switch {
+			case err == nil:
+				if q.tracker != nil {
+					q.tracker.Completed(ctx, j, attempts)
+				}
+				log.Info("job completed", "attempts", attempts)
+			case errors.Is(err, ErrJobCancelled):
+				if q.tracker != nil {
+					q.tracker.Cancelled(ctx, j, attempts)
+				}
+				log.Info("job cancelled", "attempts", attempts)
+			default:
+				if q.tracker != nil {
+					q.tracker.Failed(ctx, j, attempts, err)
+				}
+				log.Error("job failed", "attempts", attempts, "error", err)
 				if q.metrics != nil {
 					q.metrics.IncReviewErrors()
 				}

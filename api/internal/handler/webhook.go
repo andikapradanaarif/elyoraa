@@ -25,11 +25,14 @@ func New(cfg *config.Config, uc *usecase.WebhookUsecase, m *metrics.Registry) *H
 	return &Handler{cfg: cfg, uc: uc, metrics: m}
 }
 
-// Register adds the webhook, health, and metrics routes to the mux.
+// Register adds the webhook, health, metrics, and job routes to the mux.
 func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/webhook/gh", h.ServeHTTP)
 	mux.HandleFunc("/health", h.Health)
 	mux.HandleFunc(h.cfg.MetricsPath, h.metrics.Handler)
+	mux.HandleFunc("GET /jobs", h.ListJobs)
+	mux.HandleFunc("GET /jobs/{key...}", h.GetJob)
+	mux.HandleFunc("POST /jobs/retry/{key...}", h.RetryJob)
 }
 
 // ServeHTTP handles incoming GitHub webhooks.

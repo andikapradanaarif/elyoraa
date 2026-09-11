@@ -21,6 +21,7 @@ import (
 	"github.com/andikapradanaarif/elyoraa/internal/metrics"
 	"github.com/andikapradanaarif/elyoraa/internal/repository"
 	"github.com/andikapradanaarif/elyoraa/internal/repository/cache"
+	"github.com/andikapradanaarif/elyoraa/internal/repository/queue"
 	"github.com/andikapradanaarif/elyoraa/internal/service/github"
 )
 
@@ -40,7 +41,8 @@ func NewReviewUsecase(cfg *config.Config, c *cache.Cache, g *github.Client, d *d
 }
 
 // Process implements queue.Processor.
-func (r *ReviewUsecase) Process(ctx context.Context, j domain.Review) (err error) {
+func (r *ReviewUsecase) Process(ctx context.Context, j domain.Review) (attempts int, err error) {
+	attempts = 1
 	if r.store != nil && j.DeliveryID != "" {
 		_ = r.store.UpdateStatus(ctx, j.DeliveryID, "processing", "")
 	}
@@ -65,7 +67,16 @@ func (r *ReviewUsecase) Process(ctx context.Context, j domain.Review) (err error
 		r.metrics.IncReviewTotal()
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, r.cfg.ReviewTimeout)
+	// Bind a cancel func to this job's dedup slot so a newer push for the same
+	// PR actually terminates this run (including any backoff sleep).
+	jobCtx, jobCancel := context.WithCancel(ctx)
+	defer jobCancel()
+	if !r.d.BindCancel(j.JobKey, jobCancel) {
+		r.markStatus(ctx, j, "cancelled")
+		return attempts, queue.ErrJobCancelled
+	}
+
+	ctx, cancel := context.WithTimeout(jobCtx, r.cfg.ReviewTimeout)
 	defer cancel()
 
 	if j.IsIssue() {
@@ -76,7 +87,7 @@ func (r *ReviewUsecase) Process(ctx context.Context, j domain.Review) (err error
 	if err != nil {
 		r.updatePending(ctx, &j, "Review failed: could not authenticate to GitHub.")
 		r.markFailed(ctx, j, "installation token")
-		return fmt.Errorf("installation token: %w", err)
+		return attempts, fmt.Errorf("installation token: %w", err)
 	}
 
 	if err := r.cache.Fetch(ctx, j.Owner, j.Repo, token); err != nil {
@@ -87,18 +98,18 @@ func (r *ReviewUsecase) Process(ctx context.Context, j domain.Review) (err error
 				j.Owner, j.Repo, r.cfg.WorkspaceBase, j.Owner, j.Repo,
 			))
 			r.markStatus(ctx, j, "skipped")
-			return nil
+			return attempts, nil
 		}
 		r.updatePending(ctx, &j, "Review failed: could not fetch repository.")
 		r.markFailed(ctx, j, "cache fetch")
-		return fmt.Errorf("cache fetch: %w", err)
+		return attempts, fmt.Errorf("cache fetch: %w", err)
 	}
 
 	worktree, cleanup, err := r.cache.AddWorktree(ctx, j.Owner, j.Repo, j.PRNumber, j.HeadSHA)
 	if err != nil {
 		r.updatePending(ctx, &j, "Review failed: could not prepare worktree.")
 		r.markFailed(ctx, j, "add worktree")
-		return fmt.Errorf("add worktree: %w", err)
+		return attempts, fmt.Errorf("add worktree: %w", err)
 	}
 	defer cleanup()
 
@@ -106,39 +117,39 @@ func (r *ReviewUsecase) Process(ctx context.Context, j domain.Review) (err error
 	if err != nil {
 		r.updatePending(ctx, &j, "Review failed: could not fetch PR details.")
 		r.markFailed(ctx, j, "get pr")
-		return fmt.Errorf("get pr: %w", err)
+		return attempts, fmt.Errorf("get pr: %w", err)
 	}
 
 	if prInfo.IsDraft {
 		r.updatePending(ctx, &j, "Review skipped: draft PR.")
 		r.markStatus(ctx, j, "cancelled")
-		return nil
+		return attempts, nil
 	}
 
 	prompt, err := r.renderPrompt(&j, prInfo)
 	if err != nil {
 		r.updatePending(ctx, &j, "Review failed: could not render prompt.")
 		r.markFailed(ctx, j, "render prompt")
-		return fmt.Errorf("render prompt: %w", err)
+		return attempts, fmt.Errorf("render prompt: %w", err)
 	}
 
-	out, err := r.runDevin(ctx, worktree, prompt)
+	out, attempts, err := r.runDevin(ctx, &j, worktree, prompt)
 	if err != nil {
 		if ctx.Err() == context.Canceled {
-			r.updatePending(ctx, &j, "Review cancelled: a newer push replaced this one.")
+			r.updatePending(context.Background(), &j, "Review cancelled: a newer push replaced this one.")
 			r.markStatus(ctx, j, "cancelled")
-			return nil
+			return attempts, queue.ErrJobCancelled
 		}
 		r.updatePending(ctx, &j, "Review failed: Devin review run failed.")
 		r.markFailed(ctx, j, "run devin")
-		return fmt.Errorf("run devin: %w", err)
+		return attempts, fmt.Errorf("run devin: %w", err)
 	}
 
 	review, err := r.parseOutput(out)
 	if err != nil {
 		r.updatePending(ctx, &j, "Review failed: could not parse Devin output.")
 		r.markFailed(ctx, j, "parse output")
-		return fmt.Errorf("parse output: %w", err)
+		return attempts, fmt.Errorf("parse output: %w", err)
 	}
 
 	// Map comments to lines. Drop unmappable comments into the summary.
@@ -214,11 +225,11 @@ func (r *ReviewUsecase) Process(ctx context.Context, j domain.Review) (err error
 				cancel()
 			}
 			r.markStatus(ctx, j, "completed")
-			return nil
+			return attempts, nil
 		}
 		r.updatePending(ctx, &j, "Review failed: could not post review comments.")
 		r.markFailed(ctx, j, "post review")
-		return fmt.Errorf("post review: %w", err)
+		return attempts, fmt.Errorf("post review: %w", err)
 	}
 
 	if j.PendingCommentID != 0 {
@@ -226,7 +237,7 @@ func (r *ReviewUsecase) Process(ctx context.Context, j domain.Review) (err error
 	}
 
 	r.markStatus(ctx, j, "completed")
-	return nil
+	return attempts, nil
 }
 
 func (r *ReviewUsecase) markFailed(ctx context.Context, j domain.Review, msg string) {
@@ -239,7 +250,8 @@ func (r *ReviewUsecase) markFailed(ctx context.Context, j domain.Review, msg str
 // and post the response as a comment. If the repo is cloned on the server,
 // Devin gets a worktree so it can search the code. If not, Devin analyzes
 // from the issue text alone and mentions that the repo isn't available.
-func (r *ReviewUsecase) processIssue(ctx context.Context, j *domain.Review) error {
+func (r *ReviewUsecase) processIssue(ctx context.Context, j *domain.Review) (attempts int, err error) {
+	attempts = 1
 	pendingBody := "Analyzing issue…\n\n<!-- elyoraa-in-progress -->"
 	pendingCtx, cancel := context.WithTimeout(context.Background(), r.cfg.CommentTimeout)
 	commentID, err := r.gh.PostPendingComment(pendingCtx, j.InstallationID, j.Owner, j.Repo, j.PRNumber, pendingBody)
@@ -274,7 +286,7 @@ func (r *ReviewUsecase) processIssue(ctx context.Context, j *domain.Review) erro
 		if err != nil {
 			r.updatePending(ctx, j, "Issue analysis failed: internal error.")
 			r.markFailed(ctx, *j, "mkdir temp")
-			return fmt.Errorf("mkdir temp: %w", err)
+			return attempts, fmt.Errorf("mkdir temp: %w", err)
 		}
 		workdir = tmpDir
 		cleanup = func() { os.RemoveAll(tmpDir) }
@@ -287,19 +299,19 @@ func (r *ReviewUsecase) processIssue(ctx context.Context, j *domain.Review) erro
 	if err != nil {
 		r.updatePending(ctx, j, "Issue analysis failed: could not render prompt.")
 		r.markFailed(ctx, *j, "render issue prompt")
-		return fmt.Errorf("render issue prompt: %w", err)
+		return attempts, fmt.Errorf("render issue prompt: %w", err)
 	}
 
-	out, err := r.runDevin(ctx, workdir, prompt)
+	out, attempts, err := r.runDevin(ctx, j, workdir, prompt)
 	if err != nil {
 		if ctx.Err() == context.Canceled {
-			r.updatePending(ctx, j, "Issue analysis cancelled.")
+			r.updatePending(context.Background(), j, "Issue analysis cancelled.")
 			r.markStatus(ctx, *j, "cancelled")
-			return nil
+			return attempts, queue.ErrJobCancelled
 		}
 		r.updatePending(ctx, j, "Issue analysis failed: Devin run failed.")
 		r.markFailed(ctx, *j, "run devin issue")
-		return fmt.Errorf("run devin issue: %w", err)
+		return attempts, fmt.Errorf("run devin issue: %w", err)
 	}
 
 	// Post the raw output as an issue comment.
@@ -319,7 +331,7 @@ func (r *ReviewUsecase) processIssue(ctx context.Context, j *domain.Review) erro
 	}
 
 	r.markStatus(ctx, *j, "completed")
-	return nil
+	return attempts, nil
 }
 
 func (r *ReviewUsecase) renderIssuePrompt(j *domain.Review) (string, error) {
@@ -391,37 +403,298 @@ func (r *ReviewUsecase) renderPrompt(j *domain.Review, prInfo *github.PRInfo) (s
 	return buf.String(), nil
 }
 
-func (r *ReviewUsecase) runDevin(ctx context.Context, worktree, prompt string) (string, error) {
+// maxOutputLogBytes caps how much subprocess output is written to logs.
+const maxOutputLogBytes = 8192
+
+// devinPreflightTimeout bounds the `devin models list` check so a hung CLI
+// doesn't consume the whole attempt budget.
+const devinPreflightTimeout = 60 * time.Second
+
+// runDevin invokes the Devin CLI, retrying transient failures with exponential
+// backoff. It returns the combined output, the number of attempts used, and
+// the final error (if any).
+func (r *ReviewUsecase) runDevin(ctx context.Context, j *domain.Review, worktree, prompt string) (string, int, error) {
 	tmpDir, err := os.MkdirTemp("", "elyoraa-review-*")
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	defer os.RemoveAll(tmpDir)
 
 	promptFile := filepath.Join(tmpDir, "prompt.md")
 	if err := os.WriteFile(promptFile, []byte(prompt), 0o644); err != nil {
-		return "", err
+		return "", 0, err
 	}
 
-	cmd := exec.CommandContext(ctx, r.cfg.DevinBin,
+	args := []string{
 		"-p",
 		"--permission-mode", r.cfg.DevinPermissionMode,
 		"--model", r.cfg.DevinModel,
 		"--config", filepath.Join(r.cfg.DevinConfigDir, "devin-config.json"),
 		"--respect-workspace-trust", "false",
 		"--prompt-file", promptFile,
-	)
+	}
+
+	maxRetries := r.cfg.DevinMaxRetries
+	if maxRetries < 0 {
+		maxRetries = 0
+	}
+
+	for attempt := 1; ; attempt++ {
+		attemptCtx, cancel := context.WithTimeout(ctx, r.attemptTimeout())
+		log := r.jobLogger(j, attempt, worktree, args)
+
+		var out string
+		var runErr error
+		transient := true
+		reason := "preflight"
+
+		if r.cfg.DevinPreflightCheck {
+			if perr := r.devinPreflight(attemptCtx, worktree); perr != nil {
+				runErr = fmt.Errorf("devin preflight: %w", perr)
+				if rsn, det := deterministicDevinReason(runErr, runErr.Error()); det {
+					transient, reason = false, rsn
+				}
+			}
+		}
+		if runErr == nil {
+			log.Info("devin run started")
+			out, runErr = r.execDevin(attemptCtx, worktree, args, tmpDir)
+			if runErr != nil {
+				transient, reason = classifyDevinError(runErr, attemptCtx, out)
+			}
+		}
+		cancel()
+
+		if runErr == nil {
+			return out, attempt, nil
+		}
+
+		tail := tailString(out, maxOutputLogBytes)
+		if !transient || attempt > maxRetries || ctx.Err() != nil {
+			if reason == "canceled" {
+				log.Info("devin run canceled", "output", tail)
+			} else {
+				log.Error("devin run failed", "error", runErr, "transient", transient, "reason", reason, "output", tail)
+			}
+			return out, attempt, runErr
+		}
+
+		wait := r.backoff(attempt)
+		log.Warn("devin attempt failed, will retry", "error", runErr, "reason", reason, "output", tail, "retry_in", wait.String())
+		if !sleepCtx(ctx, wait) {
+			return "", attempt, ctx.Err()
+		}
+	}
+}
+
+// devinPreflight verifies the devin binary is usable: `devin models list` must
+// succeed and list the configured model.
+func (r *ReviewUsecase) devinPreflight(ctx context.Context, worktree string) error {
+	pfCtx, cancel := context.WithTimeout(ctx, devinPreflightTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(pfCtx, r.cfg.DevinBin, "models", "list")
+	cmd.Dir = worktree
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		if pfCtx.Err() == context.DeadlineExceeded {
+			return fmt.Errorf("models list timed out")
+		}
+		return fmt.Errorf("models list: %w: %s", err, tailString(string(out), 2048))
+	}
+	if r.cfg.DevinModel != "" && !strings.Contains(string(out), r.cfg.DevinModel) {
+		return fmt.Errorf("configured model %q not present in `devin models list` output", r.cfg.DevinModel)
+	}
+	return nil
+}
+
+// execDevin runs the devin subprocess once and returns its combined output.
+func (r *ReviewUsecase) execDevin(ctx context.Context, worktree string, args []string, tmpDir string) (string, error) {
+	cmd := exec.CommandContext(ctx, r.cfg.DevinBin, args...)
 	cmd.Dir = worktree
 	env := os.Environ()
 	env = append(env, "XDG_CACHE_HOME="+tmpDir, "TMPDIR="+tmpDir)
 	cmd.Env = env
 
 	out, err := cmd.CombinedOutput()
-	if err != nil {
-		slog.Error("devin command failed", "bin", r.cfg.DevinBin, "workdir", worktree, "error", err, "output", string(out))
-		return string(out), err
+	return string(out), err
+}
+
+// attemptTimeout returns the per-attempt timeout; defaults to the whole-review
+// timeout when DEVIN_ATTEMPT_TIMEOUT is unset.
+func (r *ReviewUsecase) attemptTimeout() time.Duration {
+	if r.cfg.DevinAttemptTimeout > 0 {
+		return r.cfg.DevinAttemptTimeout
 	}
-	return string(out), nil
+	return r.cfg.ReviewTimeout
+}
+
+// backoff returns the wait before retry attempt n (1-indexed).
+func (r *ReviewUsecase) backoff(retry int) time.Duration {
+	bs := r.cfg.DevinRetryBackoffs
+	if len(bs) == 0 {
+		return 30 * time.Second
+	}
+	if retry-1 >= len(bs) {
+		return bs[len(bs)-1]
+	}
+	return bs[retry-1]
+}
+
+// jobLogger returns a logger carrying the full job context.
+func (r *ReviewUsecase) jobLogger(j *domain.Review, attempt int, workdir string, args []string) *slog.Logger {
+	return slog.With(
+		"job", j.JobKey,
+		"delivery", j.DeliveryID,
+		"owner", j.Owner,
+		"repo", j.Repo,
+		"pr", j.PRNumber,
+		"type", j.Type,
+		"attempt", attempt,
+		"model", r.cfg.DevinModel,
+		"workdir", workdir,
+		"argv", redactArgs(r.cfg.DevinBin, args),
+	)
+}
+
+// Error substrings that mark a devin failure as deterministic (not retriable).
+var devinDeterministicPatterns = []string{
+	"untrusted workspace",
+	"workspace trust",
+	"unauthorized",
+	"authentication failed",
+	"invalid api key",
+	"invalid token",
+	"bad credentials",
+	"access denied",
+	"permission denied",
+	"401",
+	"403",
+	"no such file or directory",
+}
+
+// Error substrings that mark a devin failure as transient (retriable).
+var devinTransientPatterns = []string{
+	"unknown model",
+	"no models",
+	"empty model",
+	"model list",
+	"connection refused",
+	"connection reset",
+	"no such host",
+	"i/o timeout",
+	"timeout",
+	"timed out",
+	"deadline exceeded",
+	"eof",
+	"rate limit",
+	"too many requests",
+	"429",
+	"502",
+	"503",
+	"504",
+	"service unavailable",
+	"overloaded",
+	"temporarily unavailable",
+	"tls handshake",
+	"network is unreachable",
+	"dial tcp",
+}
+
+// deterministicDevinReason reports whether err/text marks a deterministic
+// (non-retriable) devin failure, returning a short reason when it does.
+func deterministicDevinReason(err error, text string) (string, bool) {
+	if errors.Is(err, context.Canceled) {
+		return "canceled", true
+	}
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, exec.ErrNotFound) {
+		return "binary not found", true
+	}
+	lower := strings.ToLower(text)
+	for _, p := range devinDeterministicPatterns {
+		if strings.Contains(lower, p) {
+			return "deterministic: " + p, true
+		}
+	}
+	return "", false
+}
+
+// classifyDevinError reports whether a devin subprocess failure looks
+// transient (worth retrying) or deterministic. attemptCtx must still be live.
+func classifyDevinError(err error, attemptCtx context.Context, out string) (bool, string) {
+	if attemptCtx.Err() == context.DeadlineExceeded {
+		return true, "attempt timeout"
+	}
+	if attemptCtx.Err() == context.Canceled {
+		return false, "canceled"
+	}
+	if rsn, det := deterministicDevinReason(err, out); det {
+		return false, rsn
+	}
+
+	lower := strings.ToLower(out)
+	for _, p := range devinTransientPatterns {
+		if strings.Contains(lower, p) {
+			return true, "transient: " + p
+		}
+	}
+	if strings.TrimSpace(out) == "" {
+		return true, "no output"
+	}
+	return false, "unrecognized error output"
+}
+
+// tailString returns the last n bytes of s, trimmed to a line boundary.
+func tailString(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	t := s[len(s)-n:]
+	if i := strings.IndexByte(t, '\n'); i >= 0 && i < len(t)-1 {
+		t = t[i+1:]
+	}
+	return fmt.Sprintf("…[truncated %d bytes]\n%s", len(s)-len(t), t)
+}
+
+// sleepCtx sleeps for d or until ctx is done. Returns false if ctx ended first.
+func sleepCtx(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
+}
+
+var secretNameRe = regexp.MustCompile(`(?i)(token|secret|password|api[_-]?key|credential)`)
+var secretValueRe = regexp.MustCompile(`(ghp_[A-Za-z0-9]{10,}|github_pat_[A-Za-z0-9_]{10,}|gho_[A-Za-z0-9]{10,}|sk-[A-Za-z0-9]{8,}|xox[baprs]-[A-Za-z0-9-]{5,})`)
+
+// redactArgs renders the command line, masking values of secret-named flags
+// and any argument that looks like a credential.
+func redactArgs(bin string, args []string) string {
+	parts := make([]string, 0, len(args)+1)
+	parts = append(parts, bin)
+	for i, a := range args {
+		if i > 0 && isSecretFlag(args[i-1]) {
+			parts = append(parts, "***")
+			continue
+		}
+		if eq := strings.IndexByte(a, '='); eq > 0 && secretNameRe.MatchString(a[:eq]) {
+			parts = append(parts, a[:eq+1]+"***")
+			continue
+		}
+		parts = append(parts, secretValueRe.ReplaceAllString(a, "***"))
+	}
+	return strings.Join(parts, " ")
+}
+
+func isSecretFlag(a string) bool {
+	if !strings.HasPrefix(a, "-") || strings.Contains(a, "=") {
+		return false
+	}
+	return secretNameRe.MatchString(a)
 }
 
 var jsonBlockRegex = regexp.MustCompile("(?s)```json\\s*(.*?)\\s*```")
