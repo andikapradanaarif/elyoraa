@@ -106,7 +106,7 @@ api/
 - Per-review `XDG_CACHE_HOME` and `TMPDIR` are isolated; `HOME` and `XDG_CONFIG_HOME` must point at the Devin credentials volume.
 - Set `DATABASE_URL` to enable PostgreSQL webhook audit logging.
 - The server automatically loads `.env` at startup (or the file in `ENV_FILE`) so you do not have to export every variable to the shell.
-- `DEVIN_MODEL` (default `swe-1.7`) is passed to the `devin` CLI with `--model`.
+- `DEVIN_MODEL` (default `swe-2-high`) is passed to the `devin` CLI with `--model`.
 - `BOT_HANDLE` (default `elyoraa`) is used to detect rereview requests in comments.
 - The bot reviews open, non-draft PRs once. It does not re-review on later pushes unless the author mentions the bot (e.g., `@elyoraa rereview`).
 - If the bot finds no issues it approves the PR; otherwise it requests changes.

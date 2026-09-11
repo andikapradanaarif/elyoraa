@@ -55,7 +55,7 @@ func Load() (*Config, error) {
 		DatabaseURL:           os.Getenv("DATABASE_URL"),
 		DevinBin:              getEnv("DEVIN_BIN", "devin"),
 		DevinConfigDir:        getEnv("DEVIN_CONFIG_DIR", "/var/lib/elyoraa/devin-config"),
-		DevinModel:            getEnv("DEVIN_MODEL", "swe-1.7"),
+		DevinModel:            getEnv("DEVIN_MODEL", "swe-2-high"),
 		DevinPermissionMode:   getEnv("DEVIN_PERMISSION_MODE", "dangerous"),
 		PromptsDir:            getEnv("PROMPTS_DIR", "/app/prompts"),
 		BotHandle:             getEnv("BOT_HANDLE", "elyoraa"),

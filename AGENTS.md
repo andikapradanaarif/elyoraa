@@ -68,7 +68,7 @@ The image is Debian-based because a host-provided `devin` binary is usually glib
 - Rereview is triggered by any mention of the bot handle (`BOT_HANDLE`, default `elyoraa`).
 - Draft PRs and `synchronize` pushes are ignored.
 - Rereview is triggered by a PR comment mentioning the bot handle (`BOT_HANDLE`, default `elyoraa`) with a rereview keyword (`rereview`, `re-review`, `review again`, `recheck`, `check again`).
-- The Devin model is configurable via `DEVIN_MODEL` (default `swe-1.7`) and passed with `--model`.
+- The Devin model is configurable via `DEVIN_MODEL` (default `swe-2-high`) and passed with `--model`.
 - If the review output has no comments, the bot approves the PR; otherwise it requests changes.
 - Issue analysis uses `prompts/issue.md`; PR review uses `prompts/review.md`.
 
