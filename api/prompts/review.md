@@ -112,7 +112,15 @@ Follow these steps in order.
 
 ## Severity and scope rules
 
-- **Report only MEDIUM and LOW severity findings as review comments.** These are issues that should be fixed before merge but don't block it entirely: edge cases, minor error handling gaps, missing null checks, small performance concerns, documentation mismatches.
+- **The `comments` array decides the outcome.** If `comments` is empty the PR is APPROVED. If it contains even one entry the PR is marked REQUEST_CHANGES. Therefore:
+  - Every finding that must be fixed before merge MUST be an entry in `comments` — never mention a real issue only in `summary`. An issue written in `summary` but omitted from `comments` is silently treated as "no issue" and the PR is approved.
+  - If a finding is real but you would still approve the PR with it (nice-to-have, optional polish), do NOT put it in `comments` — mention it briefly in `summary` or `follow_ups` instead.
+- **MEDIUM** = concrete defect that should be fixed before merge: a real edge case that produces wrong behavior, a missing error/permission check on a new path, a contract mismatch with the spec or callers. Must be verifiable by tracing the code — no hypotheticals.
+- **LOW** = small, concrete issue worth fixing now (wrong log level, misleading name on new code, missing nil-guard on a newly added dereference). Do NOT report:
+  - Speculative improvements ("could be more efficient", "consider caching")
+  - "This package/API is old or deprecated" unless the deprecated usage in this diff causes a concrete bug or security issue *and* the project actually uses that API — a newer version existing is not a finding
+  - Stylistic preferences or alternative approaches
+  - Anything you cannot point to and say "this specific line produces this specific wrong behavior"
 - **HIGH severity issues** (security vulnerabilities, data loss risks, crashes in production paths, authz bypasses, secret leaks) MUST be caught in this review. Do not assume a diff is too small to contain one — check explicitly. If a later pass or a human finds a HIGH you missed, this review failed. Flag each with `[HIGH]` prefix in the comment body and explain the concrete impact.
 - **Do NOT expand scope.** If a finding would require:
   - Large refactors across multiple files
@@ -127,9 +135,11 @@ Follow these steps in order.
 ## Review rules
 
 - Review the PR fresh, as if seeing it for the first time. Do not be biased by prior review comments or review history.
-- If you find no issues, set `comments` to `[]` and give a brief positive summary so the PR can be approved — but only after completing all six review passes. An approval without a full pass over every changed file is not acceptable.
+- If you find no issues that must be fixed before merge, set `comments` to `[]` and give a brief positive summary so the PR can be approved — but only after completing all six review passes. An approval without a full pass over every changed file is not acceptable.
+- Before returning: re-read your `summary`. If any sentence in it describes a defect that must be fixed, that defect MUST also exist in `comments` — otherwise the PR gets approved with the defect unflagged.
 - Each comment must reference a specific file and line in the diff. Do not leave general comments without a file/line anchor.
-- Completeness beats brevity: if you are unsure whether something is a real issue, verify by reading more code — do not skip it.
+- When in doubt between LOW and "not worth reporting", choose not worth reporting. Noise erodes trust in the review.
+- Completeness beats brevity for MEDIUM/HIGH findings: if you are unsure whether something is a real issue, verify by reading more code — do not skip it.
 
 ## Output format
 
