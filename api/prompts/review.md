@@ -118,7 +118,7 @@ Follow these steps in order.
 - **MEDIUM** = concrete defect that should be fixed before merge: a real edge case that produces wrong behavior, a missing error/permission check on a new path, a contract mismatch with the spec or callers. Must be verifiable by tracing the code — no hypotheticals.
 - **LOW** = small, concrete issue worth fixing now (wrong log level, misleading name on new code, missing nil-guard on a newly added dereference). Do NOT report:
   - Speculative improvements ("could be more efficient", "consider caching")
-  - "This package/API is old or deprecated" unless the deprecated usage in this diff causes a concrete bug or security issue *and* the project actually uses that API — a newer version existing is not a finding
+  - "This package/API is old or deprecated" unless the deprecated usage in this diff causes a concrete bug or security issue _and_ the project actually uses that API — a newer version existing is not a finding
   - Stylistic preferences or alternative approaches
   - Anything you cannot point to and say "this specific line produces this specific wrong behavior"
 - **HIGH severity issues** (security vulnerabilities, data loss risks, crashes in production paths, authz bypasses, secret leaks) MUST be caught in this review. Do not assume a diff is too small to contain one — check explicitly. If a later pass or a human finds a HIGH you missed, this review failed. Flag each with `[HIGH]` prefix in the comment body and explain the concrete impact.

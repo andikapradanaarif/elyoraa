@@ -126,6 +126,10 @@ func (r *ReviewUsecase) Process(ctx context.Context, j domain.Review) (attempts 
 		return attempts, nil
 	}
 
+	// Fetch the previous bot review now — a separate reconcile pass will
+	// re-verify those findings AFTER the unbiased fresh review completes.
+	prevReview := r.fetchPreviousReview(ctx, &j)
+
 	prompt, err := r.renderPrompt(&j, prInfo)
 	if err != nil {
 		r.updatePending(ctx, &j, "Review failed: could not render prompt.")
@@ -151,6 +155,11 @@ func (r *ReviewUsecase) Process(ctx context.Context, j domain.Review) (attempts 
 		r.markFailed(ctx, j, "parse output")
 		return attempts, fmt.Errorf("parse output: %w", err)
 	}
+
+	// Second pass: reconcile previous-review findings against the fresh
+	// review. Merges still-present findings the fresh review missed and
+	// records each prior finding's status.
+	r.reconcileFindings(ctx, &j, worktree, prevReview, review)
 
 	// Map comments to lines. Drop unmappable comments into the summary.
 	fileComments := r.gh.MapCommentsToPositions(prInfo.Files, review.Comments)
@@ -181,6 +190,20 @@ func (r *ReviewUsecase) Process(ctx context.Context, j domain.Review) (attempts 
 		}
 		if review.HighSeveritySweep != "" {
 			sb.WriteString(fmt.Sprintf("\n_High-severity sweep: %s_", review.HighSeveritySweep))
+		}
+		if len(review.PriorFindings) > 0 {
+			var fixed, present, unclear int
+			for _, pf := range review.PriorFindings {
+				switch pf.Status {
+				case "fixed":
+					fixed++
+				case "still_present":
+					present++
+				default:
+					unclear++
+				}
+			}
+			sb.WriteString(fmt.Sprintf("\n_Previous findings re-check: %d fixed, %d still present, %d unclear_", fixed, present, unclear))
 		}
 		summary = sb.String()
 	}
@@ -487,6 +510,23 @@ func (r *ReviewUsecase) updatePending(ctx context.Context, j *domain.Review, bod
 	ctx2, cancel := context.WithTimeout(context.Background(), r.cfg.CommentTimeout)
 	defer cancel()
 	_ = r.gh.EditComment(ctx2, j.InstallationID, j.Owner, j.Repo, j.PendingCommentID, body)
+}
+
+// priorFindingsCap bounds how many previous-review comments are injected
+// into the next review prompt.
+const priorFindingsCap = 30
+
+// fetchPreviousReview returns the most recent bot review on the PR with its
+// inline findings. Failures are non-fatal — the review proceeds without them.
+func (r *ReviewUsecase) fetchPreviousReview(ctx context.Context, j *domain.Review) *github.PreviousReview {
+	cctx, cancel := context.WithTimeout(ctx, r.cfg.CommentTimeout)
+	defer cancel()
+	prev, err := r.gh.GetPreviousReview(cctx, j.InstallationID, j.Owner, j.Repo, j.PRNumber, r.cfg.BotHandle, priorFindingsCap)
+	if err != nil {
+		slog.Warn("failed to fetch previous review", "job", j.JobKey, "owner", j.Owner, "repo", j.Repo, "pr", j.PRNumber, "error", err)
+		return nil
+	}
+	return prev
 }
 
 func (r *ReviewUsecase) renderPrompt(j *domain.Review, prInfo *github.PRInfo) (string, error) {
@@ -825,6 +865,110 @@ func (r *ReviewUsecase) parseOutput(out string) (*domain.Output, error) {
 		return &domain.Output{Summary: strings.TrimSpace(out), Comments: nil}, nil
 	}
 	return &result, nil
+}
+
+// reconcileFindings runs a focused second Devin pass that re-verifies each
+// finding from the previous bot review against the current code, then merges
+// still-present findings the fresh review missed back into the output. It
+// runs AFTER the unbiased fresh review so prior findings cannot bias it.
+func (r *ReviewUsecase) reconcileFindings(ctx context.Context, j *domain.Review, worktree string, prev *github.PreviousReview, review *domain.Output) {
+	if prev == nil || len(prev.Findings) == 0 {
+		return
+	}
+
+	markUnclear := func() {
+		for _, f := range prev.Findings {
+			review.PriorFindings = append(review.PriorFindings, domain.PriorFindingStatus{Path: f.Path, Line: f.Line, Status: "unclear"})
+		}
+	}
+
+	prompt, err := r.renderReconcilePrompt(j, prev, review)
+	if err != nil {
+		slog.Warn("reconcile prompt render failed", "job", j.JobKey, "error", err)
+		markUnclear()
+		return
+	}
+
+	out, _, err := r.runDevin(ctx, j, worktree, prompt)
+	if err != nil {
+		if ctx.Err() != nil {
+			return // job cancelled or deadline — don't fabricate statuses
+		}
+		slog.Warn("reconcile pass failed", "job", j.JobKey, "error", err)
+		markUnclear()
+		return
+	}
+
+	rec, err := parseReconcileOutput(out)
+	if err != nil {
+		slog.Warn("reconcile output parse failed", "job", j.JobKey, "error", err)
+		markUnclear()
+		return
+	}
+
+	review.PriorFindings = rec.PriorFindings
+	statused := make(map[string]bool, len(rec.PriorFindings))
+	for _, pf := range rec.PriorFindings {
+		statused[fmt.Sprintf("%s:%d", pf.Path, pf.Line)] = true
+	}
+	for _, f := range prev.Findings {
+		if !statused[fmt.Sprintf("%s:%d", f.Path, f.Line)] {
+			review.PriorFindings = append(review.PriorFindings, domain.PriorFindingStatus{Path: f.Path, Line: f.Line, Status: "unclear"})
+		}
+	}
+
+	// Merge additional comments, deduped against the fresh comments.
+	seen := make(map[string]bool, len(review.Comments))
+	for _, c := range review.Comments {
+		seen[fmt.Sprintf("%s:%d", c.Path, c.Line)] = true
+	}
+	for _, c := range rec.AdditionalComments {
+		k := fmt.Sprintf("%s:%d", c.Path, c.Line)
+		if !seen[k] {
+			review.Comments = append(review.Comments, c)
+			seen[k] = true
+		}
+	}
+}
+
+// reconcileOutput is the parsed result of the reconcile pass.
+type reconcileOutput struct {
+	PriorFindings      []domain.PriorFindingStatus `json:"prior_findings_status"`
+	AdditionalComments []domain.Comment            `json:"additional_comments"`
+}
+
+func parseReconcileOutput(out string) (*reconcileOutput, error) {
+	matches := jsonBlockRegex.FindAllStringSubmatch(out, -1)
+	if len(matches) == 0 {
+		return nil, errors.New("no json block in reconcile output")
+	}
+	var rec reconcileOutput
+	if err := json.Unmarshal([]byte(matches[len(matches)-1][1]), &rec); err != nil {
+		return nil, err
+	}
+	return &rec, nil
+}
+
+func (r *ReviewUsecase) renderReconcilePrompt(j *domain.Review, prev *github.PreviousReview, review *domain.Output) (string, error) {
+	tmpl, err := template.ParseFiles(filepath.Join(r.cfg.PromptsDir, "reconcile.md"))
+	if err != nil {
+		return "", err
+	}
+
+	data := map[string]any{
+		"RepoKey":       fmt.Sprintf("%s/%s", j.Owner, j.Repo),
+		"PRNumber":      j.PRNumber,
+		"Title":         j.Title,
+		"HeadSHA":       j.HeadSHA,
+		"Findings":      prev.Findings,
+		"FreshComments": review.Comments,
+	}
+
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, data); err != nil {
+		return "", err
+	}
+	return buf.String(), nil
 }
 
 // WriteDevinConfig writes a locked devin-config.json inside dir. It omits the

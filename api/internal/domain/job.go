@@ -47,14 +47,23 @@ type ProposedIssue struct {
 	Labels []string `json:"labels"`
 }
 
+// PriorFindingStatus records how a finding from the previous bot review
+// fared when re-verified against the current diff.
+type PriorFindingStatus struct {
+	Path   string `json:"path"`
+	Line   int    `json:"line"`
+	Status string `json:"status"` // "fixed", "still_present", or "unclear"
+}
+
 // Output is the parsed Devin review output.
 type Output struct {
-	Summary           string     `json:"summary"`
-	PassesCompleted   []string   `json:"passes_completed"`
-	FilesReviewed     []string   `json:"files_reviewed"`
-	HighSeveritySweep string     `json:"high_severity_sweep"`
-	Comments          []Comment  `json:"comments"`
-	FollowUps         []FollowUp `json:"follow_ups"`
+	Summary           string               `json:"summary"`
+	PassesCompleted   []string             `json:"passes_completed"`
+	FilesReviewed     []string             `json:"files_reviewed"`
+	HighSeveritySweep string               `json:"high_severity_sweep"`
+	Comments          []Comment            `json:"comments"`
+	FollowUps         []FollowUp           `json:"follow_ups"`
+	PriorFindings     []PriorFindingStatus `json:"prior_findings_status"`
 }
 
 // IsIssue reports whether this is an issue analysis job (not a PR review).

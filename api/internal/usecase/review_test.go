@@ -186,3 +186,44 @@ func TestRenderIssuePrompt(t *testing.T) {
 		t.Fatalf("prompt has unresolved template keys:\n%s", out)
 	}
 }
+
+func TestRenderReconcilePrompt(t *testing.T) {
+	r := &ReviewUsecase{cfg: &config.Config{PromptsDir: "../../prompts"}}
+	j := &domain.Review{Owner: "o", Repo: "r", PRNumber: 3, Title: "t", Author: "alice", HeadSHA: "abc"}
+	prev := &github.PreviousReview{
+		State: "CHANGES_REQUESTED",
+		Body:  "Found 2 issues",
+		Findings: []github.PriorFinding{
+			{Path: "a.go", Line: 10, Body: "nil dereference", Outdated: true,
+				Replies: []github.PriorReply{{Author: "alice", Body: "fixed in next push"}}},
+		},
+	}
+	review := &domain.Output{Comments: []domain.Comment{{Path: "b.go", Line: 5, Severity: "medium", Body: "swallowed error"}}}
+
+	out, err := r.renderReconcilePrompt(j, prev, review)
+	if err != nil {
+		t.Fatalf("renderReconcilePrompt: %v", err)
+	}
+	for _, want := range []string{"nil dereference", "outdated", "fixed in next push", "swallowed error", "prior_findings_status", "additional_comments"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("reconcile prompt missing %q", want)
+		}
+	}
+	if strings.Contains(out, "<no value>") {
+		t.Fatalf("prompt has unresolved template keys")
+	}
+}
+
+func TestParseReconcileOutput(t *testing.T) {
+	out := "Analysis done.\n\n```json\n{\"prior_findings_status\": [{\"path\": \"a.go\", \"line\": 10, \"status\": \"still_present\"}], \"additional_comments\": [{\"path\": \"a.go\", \"line\": 12, \"severity\": \"high\", \"body\": \"still broken\"}]}\n```\n"
+	rec, err := parseReconcileOutput(out)
+	if err != nil {
+		t.Fatalf("parseReconcileOutput: %v", err)
+	}
+	if len(rec.PriorFindings) != 1 || rec.PriorFindings[0].Status != "still_present" {
+		t.Fatalf("bad prior findings: %+v", rec.PriorFindings)
+	}
+	if len(rec.AdditionalComments) != 1 || rec.AdditionalComments[0].Line != 12 {
+		t.Fatalf("bad additional comments: %+v", rec.AdditionalComments)
+	}
+}

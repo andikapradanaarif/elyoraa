@@ -408,6 +408,131 @@ func (c *Client) ResolveLabels(ctx context.Context, installationID int64, owner,
 	return out
 }
 
+// PriorReply is a threaded reply on a previous review finding.
+type PriorReply struct {
+	Author string
+	Body   string
+	IsBot  bool
+}
+
+// PriorFinding is one inline comment left by a previous bot review.
+type PriorFinding struct {
+	Path     string
+	Line     int
+	Body     string
+	Outdated bool // the diff moved since the comment was posted
+	Replies  []PriorReply
+}
+
+// PreviousReview is the most recent bot-authored review on a PR, with its
+// inline findings and any replies from the discussion.
+type PreviousReview struct {
+	State       string
+	Body        string
+	SubmittedAt time.Time
+	Findings    []PriorFinding
+}
+
+// GetPreviousReview returns the most recent bot-authored review on the PR
+// (matched by the bot handle when set), including the inline findings that
+// belong to that review and their reply threads. Returns nil, nil when no
+// prior bot review exists. Fetches at most maxFindings findings.
+func (c *Client) GetPreviousReview(ctx context.Context, installationID int64, owner, repo string, number int, botHandle string, maxFindings int) (*PreviousReview, error) {
+	client := c.installationClient(ctx, installationID)
+
+	isOurBot := func(login string) bool {
+		l := strings.ToLower(login)
+		if !strings.HasSuffix(l, "[bot]") {
+			return false
+		}
+		return botHandle == "" || strings.Contains(l, strings.ToLower(botHandle))
+	}
+
+	var reviews []*go_github.PullRequestReview
+	page := 1
+	for {
+		rv, resp, err := client.PullRequests.ListReviews(ctx, owner, repo, number, &go_github.ListOptions{Page: page, PerPage: 100})
+		if err != nil {
+			return nil, fmt.Errorf("list reviews: %w", err)
+		}
+		reviews = append(reviews, rv...)
+		if resp.NextPage == 0 || len(reviews) >= 100 {
+			break
+		}
+		page = resp.NextPage
+	}
+
+	sort.Slice(reviews, func(i, j int) bool {
+		return reviews[i].GetSubmittedAt().Time.After(reviews[j].GetSubmittedAt().Time)
+	})
+
+	var prev *go_github.PullRequestReview
+	for _, r := range reviews {
+		if isOurBot(r.GetUser().GetLogin()) {
+			prev = r
+			break
+		}
+	}
+	if prev == nil {
+		return nil, nil
+	}
+
+	out := &PreviousReview{
+		State:       prev.GetState(),
+		Body:        prev.GetBody(),
+		SubmittedAt: prev.GetSubmittedAt().Time,
+	}
+	if maxFindings <= 0 {
+		return out, nil
+	}
+
+	var comments []*go_github.PullRequestComment
+	page = 1
+	for len(comments) < 300 {
+		cm, resp, err := client.PullRequests.ListComments(ctx, owner, repo, number, &go_github.PullRequestListCommentsOptions{
+			Sort:        "created",
+			Direction:   "asc",
+			ListOptions: go_github.ListOptions{Page: page, PerPage: 100},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("list review comments: %w", err)
+		}
+		comments = append(comments, cm...)
+		if resp.NextPage == 0 {
+			break
+		}
+		page = resp.NextPage
+	}
+
+	reviewID := prev.GetID()
+	replies := make(map[int64][]PriorReply)
+	for _, cm := range comments {
+		if parent := cm.GetInReplyTo(); parent != 0 {
+			replies[parent] = append(replies[parent], PriorReply{
+				Author: cm.GetUser().GetLogin(),
+				Body:   cm.GetBody(),
+				IsBot:  strings.HasSuffix(strings.ToLower(cm.GetUser().GetLogin()), "[bot]"),
+			})
+		}
+	}
+	for _, cm := range comments {
+		if len(out.Findings) >= maxFindings {
+			break
+		}
+		if cm.GetInReplyTo() != 0 || cm.GetPullRequestReviewID() != reviewID || !isOurBot(cm.GetUser().GetLogin()) {
+			continue
+		}
+		out.Findings = append(out.Findings, PriorFinding{
+			Path:     cm.GetPath(),
+			Line:     cm.GetLine(),
+			Body:     cm.GetBody(),
+			Outdated: cm.Position == nil,
+			Replies:  replies[cm.GetID()],
+		})
+	}
+	return out, nil
+}
+
 // PostPendingComment posts a temporary "Review in progress…" issue comment.
 func (c *Client) PostPendingComment(ctx context.Context, installationID int64, owner, repo string, number int, body string) (int64, error) {
 	client := c.installationClient(ctx, installationID)

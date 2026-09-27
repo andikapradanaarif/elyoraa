@@ -72,6 +72,7 @@ The image is Debian-based because a host-provided `devin` binary is usually glib
 - Rereview is triggered by any mention of the bot handle (`BOT_HANDLE`, default `elyoraa`).
 - Draft PRs and `synchronize` pushes are ignored.
 - Rereview is triggered by a PR comment mentioning the bot handle (`BOT_HANDLE`, default `elyoraa`) with a rereview keyword (`rereview`, `re-review`, `review again`, `recheck`, `check again`).
+- Reviews run in two phases so prior findings can't bias the fresh pass: (1) `prompts/review.md` — clean review, no prior context; (2) `prompts/reconcile.md` — a second Devin run that re-verifies the previous bot review's findings (latest `[bot]` review matching `BOT_HANDLE`, capped at 30) against the current code, merging still-present findings the fresh review missed and reporting `prior_findings_status` (fixed/still_present/unclear). Reconcile failures degrade to "unclear" — they never block posting the review.
 - The Devin model is configurable via `DEVIN_MODEL` (default `swe-2-high`) and passed with `--model`.
 - If the review output has no comments, the bot approves the PR; otherwise it requests changes.
 - Issue analysis uses `prompts/issue.md`; PR review uses `prompts/review.md`.
