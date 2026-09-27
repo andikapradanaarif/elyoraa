@@ -39,6 +39,14 @@ type FollowUp struct {
 	Description string `json:"description"`
 }
 
+// ProposedIssue is a sub-issue the bot creates once a human accepts a
+// proposed breakdown in an issue discussion.
+type ProposedIssue struct {
+	Title  string   `json:"title"`
+	Body   string   `json:"body"`
+	Labels []string `json:"labels"`
+}
+
 // Output is the parsed Devin review output.
 type Output struct {
 	Summary           string     `json:"summary"`

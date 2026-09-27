@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -202,18 +203,18 @@ func (c *Client) PostReview(ctx context.Context, installationID int64, owner, re
 			continue
 		}
 		draftComments = append(draftComments, &go_github.DraftReviewComment{
-			Path: go_github.String(cm.Path),
-			Line: go_github.Int(cm.Line),
-			Side: go_github.String("RIGHT"),
-			Body: go_github.String(cm.Body),
+			Path: go_github.Ptr(cm.Path),
+			Line: go_github.Ptr(cm.Line),
+			Side: go_github.Ptr("RIGHT"),
+			Body: go_github.Ptr(cm.Body),
 		})
 	}
 
 	_, _, err := client.PullRequests.CreateReview(ctx, owner, repo, number, &go_github.PullRequestReviewRequest{
-		Body:     go_github.String(summary),
-		Event:    go_github.String(state),
+		Body:     go_github.Ptr(summary),
+		Event:    go_github.Ptr(state),
 		Comments: draftComments,
-		CommitID: go_github.String(headSHA),
+		CommitID: go_github.Ptr(headSHA),
 	})
 	if err != nil {
 		return fmt.Errorf("create review: %w", err)
@@ -228,10 +229,189 @@ type FileComment struct {
 	Body string
 }
 
+// IssueComment is a single comment on an issue (or PR conversation).
+type IssueComment struct {
+	ID        int64
+	Author    string
+	Body      string
+	CreatedAt time.Time
+	IsBot     bool
+}
+
+// ListIssueComments returns the comment thread for an issue, oldest first.
+// It is bounded by maxComments and maxBytes so threads stay prompt-sized.
+func (c *Client) ListIssueComments(ctx context.Context, installationID int64, owner, repo string, number, maxComments, maxBytes int) ([]IssueComment, error) {
+	client := c.installationClient(ctx, installationID)
+
+	var out []IssueComment
+	totalBytes := 0
+	page := 1
+	for {
+		comments, resp, err := client.Issues.ListComments(ctx, owner, repo, number, &go_github.IssueListCommentsOptions{
+			Sort:        go_github.Ptr("created"),
+			Direction:   go_github.Ptr("asc"),
+			ListOptions: go_github.ListOptions{Page: page, PerPage: 100},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("list issue comments: %w", err)
+		}
+		for _, cm := range comments {
+			if len(out) >= maxComments || totalBytes >= maxBytes {
+				return out, nil
+			}
+			body := cm.GetBody()
+			totalBytes += len(body)
+			author := cm.GetUser().GetLogin()
+			out = append(out, IssueComment{
+				ID:        cm.GetID(),
+				Author:    author,
+				Body:      body,
+				CreatedAt: cm.GetCreatedAt().Time,
+				IsBot:     strings.HasSuffix(strings.ToLower(author), "[bot]"),
+			})
+		}
+		if resp.NextPage == 0 {
+			return out, nil
+		}
+		page = resp.NextPage
+	}
+}
+
+// CreatedIssue is a GitHub issue created by the bot.
+type CreatedIssue struct {
+	Number int
+	URL    string
+	Title  string
+}
+
+// CreateIssue creates a GitHub issue with the given title, body, and labels.
+func (c *Client) CreateIssue(ctx context.Context, installationID int64, owner, repo, title, body string, labels []string) (*CreatedIssue, error) {
+	client := c.installationClient(ctx, installationID)
+
+	req := &go_github.IssueRequest{
+		Title: go_github.Ptr(title),
+		Body:  go_github.Ptr(body),
+	}
+	if len(labels) > 0 {
+		req.Labels = &labels
+	}
+	issue, _, err := client.Issues.Create(ctx, owner, repo, req)
+	if err != nil {
+		return nil, fmt.Errorf("create issue: %w", err)
+	}
+	return &CreatedIssue{Number: issue.GetNumber(), URL: issue.GetHTMLURL(), Title: issue.GetTitle()}, nil
+}
+
+// ListLabels returns the names of all labels in the repository.
+func (c *Client) ListLabels(ctx context.Context, installationID int64, owner, repo string) ([]string, error) {
+	client := c.installationClient(ctx, installationID)
+
+	var names []string
+	page := 1
+	for {
+		labels, resp, err := client.Issues.ListLabels(ctx, owner, repo, &go_github.ListOptions{Page: page, PerPage: 100})
+		if err != nil {
+			return nil, fmt.Errorf("list labels: %w", err)
+		}
+		for _, l := range labels {
+			names = append(names, l.GetName())
+		}
+		if resp.NextPage == 0 {
+			return names, nil
+		}
+		page = resp.NextPage
+	}
+}
+
+// CreateLabel creates a label. No error is returned if it already exists.
+func (c *Client) CreateLabel(ctx context.Context, installationID int64, owner, repo, name, color, description string) error {
+	client := c.installationClient(ctx, installationID)
+	_, _, err := client.Issues.CreateLabel(ctx, owner, repo, &go_github.Label{
+		Name:        go_github.Ptr(name),
+		Color:       go_github.Ptr(color),
+		Description: go_github.Ptr(description),
+	})
+	if err != nil {
+		var ghErr *go_github.ErrorResponse
+		if errors.As(err, &ghErr) && ghErr.Response != nil && ghErr.Response.StatusCode == http.StatusUnprocessableEntity {
+			return nil // already exists
+		}
+		return fmt.Errorf("create label %q: %w", name, err)
+	}
+	return nil
+}
+
+// labelAutoCreate is the vocabulary of labels the bot may create when missing,
+// mapped to their GitHub default colors. Anything else is only applied when it
+// already exists in the repository.
+var labelAutoCreate = map[string]string{
+	"elyoraa":          "ededed",
+	"bug":              "d73a4a",
+	"documentation":    "0075ca",
+	"enhancement":      "a2eeef",
+	"good first issue": "7057ff",
+	"help wanted":      "008672",
+	"question":         "d876e3",
+	"refactor":         "1f6feb",
+	"chore":            "ededed",
+	"testing":          "bfdadc",
+	"performance":      "f9d0c4",
+	"security":         "e99695",
+	"tech-debt":        "f9d0c4",
+	"dependencies":     "0366d6",
+	"ci":               "bfd4f2",
+	"epic":             "3e4b9e",
+}
+
+// ResolveLabels maps suggested label names to labels that exist (or are
+// safely auto-created) in the repo. Names that can't be matched or created are
+// dropped. always contains labels that must be present (e.g. the bot tag).
+// Returns nil on API failure so issue creation can proceed unlabeled.
+func (c *Client) ResolveLabels(ctx context.Context, installationID int64, owner, repo string, always, suggested []string) map[string]string {
+	existing, err := c.ListLabels(ctx, installationID, owner, repo)
+	if err != nil {
+		slog.Warn("could not list repo labels; creating issues unlabeled", "owner", owner, "repo", repo, "error", err)
+		return nil
+	}
+
+	byLower := make(map[string]string, len(existing))
+	for _, n := range existing {
+		byLower[strings.ToLower(n)] = n
+	}
+
+	out := make(map[string]string)
+	for i, name := range append(append([]string{}, always...), suggested...) {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		mandatory := i < len(always)
+		lower := strings.ToLower(name)
+		if actual, ok := byLower[lower]; ok {
+			out[lower] = actual
+			continue
+		}
+		color, ok := labelAutoCreate[lower]
+		if !ok {
+			if !mandatory {
+				continue
+			}
+			color = "ededed"
+		}
+		if err := c.CreateLabel(ctx, installationID, owner, repo, name, color, "created by elyoraa"); err != nil {
+			slog.Warn("could not create label", "owner", owner, "repo", repo, "label", name, "error", err)
+			continue
+		}
+		byLower[lower] = name
+		out[lower] = name
+	}
+	return out
+}
+
 // PostPendingComment posts a temporary "Review in progress…" issue comment.
 func (c *Client) PostPendingComment(ctx context.Context, installationID int64, owner, repo string, number int, body string) (int64, error) {
 	client := c.installationClient(ctx, installationID)
-	cm, _, err := client.Issues.CreateComment(ctx, owner, repo, number, &go_github.IssueComment{Body: go_github.String(body)})
+	cm, _, err := client.Issues.CreateComment(ctx, owner, repo, number, &go_github.IssueComment{Body: go_github.Ptr(body)})
 	if err != nil {
 		return 0, fmt.Errorf("create pending comment: %w", err)
 	}
@@ -241,7 +421,7 @@ func (c *Client) PostPendingComment(ctx context.Context, installationID int64, o
 // EditComment updates an existing issue/PR comment.
 func (c *Client) EditComment(ctx context.Context, installationID int64, owner, repo string, commentID int64, body string) error {
 	client := c.installationClient(ctx, installationID)
-	_, _, err := client.Issues.EditComment(ctx, owner, repo, commentID, &go_github.IssueComment{Body: go_github.String(body)})
+	_, _, err := client.Issues.EditComment(ctx, owner, repo, commentID, &go_github.IssueComment{Body: go_github.Ptr(body)})
 	if err != nil {
 		return fmt.Errorf("edit comment: %w", err)
 	}

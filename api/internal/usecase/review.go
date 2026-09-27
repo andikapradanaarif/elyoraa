@@ -295,7 +295,11 @@ func (r *ReviewUsecase) processIssue(ctx context.Context, j *domain.Review) (att
 
 	j.RepoAvailable = repoAvailable
 
-	prompt, err := r.renderIssuePrompt(j)
+	// Fetch the comment thread so the analysis can follow prior discussion:
+	// previous bot replies, human acceptance of a proposal, open questions.
+	thread := r.fetchIssueThread(ctx, j)
+
+	prompt, err := r.renderIssuePrompt(j, thread)
 	if err != nil {
 		r.updatePending(ctx, j, "Issue analysis failed: could not render prompt.")
 		r.markFailed(ctx, *j, "render issue prompt")
@@ -314,10 +318,27 @@ func (r *ReviewUsecase) processIssue(ctx context.Context, j *domain.Review) (att
 		return attempts, fmt.Errorf("run devin issue: %w", err)
 	}
 
-	// Post the raw output as an issue comment.
+	// Post the analysis as an issue comment. If Devin appended a create_issues
+	// action block (i.e. a human accepted a proposed breakdown), create the
+	// issues and link them under the reply.
 	response := strings.TrimSpace(out)
+
+	actions, response := parseIssueActions(response)
 	if response == "" {
 		response = "No output from analysis."
+	}
+
+	if len(actions.CreateIssues) > 0 {
+		created := r.createIssues(ctx, j, actions.CreateIssues)
+		if len(created) > 0 {
+			var sb strings.Builder
+			sb.WriteString(response)
+			sb.WriteString("\n\n**Created issues:**\n")
+			for _, ci := range created {
+				sb.WriteString(fmt.Sprintf("- %s — %s\n", ci.URL, ci.Title))
+			}
+			response = sb.String()
+		}
 	}
 
 	if j.PendingCommentID != 0 {
@@ -334,7 +355,34 @@ func (r *ReviewUsecase) processIssue(ctx context.Context, j *domain.Review) (att
 	return attempts, nil
 }
 
-func (r *ReviewUsecase) renderIssuePrompt(j *domain.Review) (string, error) {
+// issueThreadMaxComments and issueThreadMaxBytes bound how much of an issue's
+// comment thread is injected into the analysis prompt.
+const (
+	issueThreadMaxComments = 50
+	issueThreadMaxBytes    = 48 * 1024
+)
+
+// fetchIssueThread returns the issue's comment thread, minus the transient
+// "Analyzing issue…" placeholder comment. Failures are non-fatal.
+func (r *ReviewUsecase) fetchIssueThread(ctx context.Context, j *domain.Review) []github.IssueComment {
+	cctx, cancel := context.WithTimeout(ctx, r.cfg.CommentTimeout)
+	defer cancel()
+	comments, err := r.gh.ListIssueComments(cctx, j.InstallationID, j.Owner, j.Repo, j.PRNumber, issueThreadMaxComments, issueThreadMaxBytes)
+	if err != nil {
+		slog.Warn("failed to fetch issue comments", "job", j.JobKey, "owner", j.Owner, "repo", j.Repo, "issue", j.PRNumber, "error", err)
+		return nil
+	}
+	out := comments[:0]
+	for _, c := range comments {
+		if strings.Contains(c.Body, "<!-- elyoraa-in-progress -->") {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+func (r *ReviewUsecase) renderIssuePrompt(j *domain.Review, thread []github.IssueComment) (string, error) {
 	tmpl, err := template.ParseFiles(filepath.Join(r.cfg.PromptsDir, "issue.md"))
 	if err != nil {
 		return "", err
@@ -345,10 +393,12 @@ func (r *ReviewUsecase) renderIssuePrompt(j *domain.Review) (string, error) {
 		"Repo":           j.Repo,
 		"IssueNumber":    j.PRNumber,
 		"Title":          j.Title,
+		"Author":         j.Author,
 		"Body":           j.Body,
 		"TriggerComment": j.TriggerComment,
 		"BotHandle":      r.cfg.BotHandle,
 		"RepoAvailable":  j.RepoAvailable,
+		"Thread":         thread,
 	}
 
 	var buf bytes.Buffer
@@ -356,6 +406,71 @@ func (r *ReviewUsecase) renderIssuePrompt(j *domain.Review) (string, error) {
 		return "", err
 	}
 	return buf.String(), nil
+}
+
+// issueActions is the optional JSON action block Devin appends to an issue
+// reply when a human has accepted a proposed breakdown.
+type issueActions struct {
+	CreateIssues []domain.ProposedIssue `json:"create_issues"`
+}
+
+// maxCreatedIssues bounds how many issues one job may create.
+const maxCreatedIssues = 10
+
+// parseIssueActions extracts a trailing ```json action block from Devin's
+// reply, returning the actions and the reply text with the block removed.
+func parseIssueActions(out string) (issueActions, string) {
+	var acts issueActions
+	matches := jsonBlockRegex.FindAllStringSubmatchIndex(out, -1)
+	if len(matches) == 0 {
+		return acts, out
+	}
+	last := matches[len(matches)-1]
+	if err := json.Unmarshal([]byte(out[last[2]:last[3]]), &acts); err != nil || len(acts.CreateIssues) == 0 {
+		return issueActions{}, out
+	}
+	cleaned := strings.TrimSpace(out[:last[0]] + out[last[1]:])
+	return acts, cleaned
+}
+
+// createIssues creates GitHub issues for an accepted breakdown proposal,
+// resolving suggested labels against the repo's label set.
+func (r *ReviewUsecase) createIssues(ctx context.Context, j *domain.Review, props []domain.ProposedIssue) []github.CreatedIssue {
+	if len(props) > maxCreatedIssues {
+		props = props[:maxCreatedIssues]
+	}
+
+	var suggested []string
+	for _, p := range props {
+		suggested = append(suggested, p.Labels...)
+	}
+	resolved := r.gh.ResolveLabels(ctx, j.InstallationID, j.Owner, j.Repo, []string{r.cfg.BotHandle}, suggested)
+
+	var created []github.CreatedIssue
+	for _, p := range props {
+		title := strings.TrimSpace(p.Title)
+		if title == "" {
+			continue
+		}
+		var labels []string
+		if botTag, ok := resolved[strings.ToLower(r.cfg.BotHandle)]; ok {
+			labels = append(labels, botTag)
+		}
+		for _, l := range p.Labels {
+			if actual, ok := resolved[strings.ToLower(strings.TrimSpace(l))]; ok {
+				labels = append(labels, actual)
+			}
+		}
+
+		ci, err := r.gh.CreateIssue(ctx, j.InstallationID, j.Owner, j.Repo, title, p.Body, labels)
+		if err != nil {
+			slog.Warn("failed to create issue", "job", j.JobKey, "title", title, "error", err)
+			continue
+		}
+		slog.Info("created issue", "job", j.JobKey, "issue", ci.Number, "title", ci.Title)
+		created = append(created, *ci)
+	}
+	return created
 }
 
 func (r *ReviewUsecase) markStatus(ctx context.Context, j domain.Review, status string) {

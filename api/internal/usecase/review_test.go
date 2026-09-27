@@ -8,6 +8,10 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/andikapradanaarif/elyoraa/internal/config"
+	"github.com/andikapradanaarif/elyoraa/internal/domain"
+	"github.com/andikapradanaarif/elyoraa/internal/service/github"
 )
 
 func exitErr() error {
@@ -122,5 +126,63 @@ func TestClassifyDevinErrorWrapped(t *testing.T) {
 	tr, _ := classifyDevinError(err, context.Background(), "")
 	if !tr {
 		t.Fatal("empty output should be transient regardless of error type")
+	}
+}
+
+func TestParseIssueActions(t *testing.T) {
+	// Reply with a trailing action block.
+	out := "Here is the breakdown you approved.\n\n```json\n{\"create_issues\": [{\"title\": \"Split queue\", \"body\": \"Do it\", \"labels\": [\"refactor\"]}]}\n```\n"
+	acts, cleaned := parseIssueActions(out)
+	if len(acts.CreateIssues) != 1 || acts.CreateIssues[0].Title != "Split queue" {
+		t.Fatalf("unexpected actions: %+v", acts)
+	}
+	if strings.Contains(cleaned, "```json") || !strings.Contains(cleaned, "breakdown you approved") {
+		t.Fatalf("bad cleaned output: %q", cleaned)
+	}
+
+	// Reply without an action block stays untouched.
+	out = "Just analysis, no actions."
+	acts, cleaned = parseIssueActions(out)
+	if len(acts.CreateIssues) != 0 || cleaned != out {
+		t.Fatalf("expected passthrough, got %+v %q", acts, cleaned)
+	}
+
+	// A non-action json block (no create_issues) is left visible.
+	out = "Example:\n\n```json\n{\"foo\": 1}\n```\n"
+	acts, cleaned = parseIssueActions(out)
+	if len(acts.CreateIssues) != 0 || cleaned != out {
+		t.Fatalf("non-action block should pass through, got %+v %q", acts, cleaned)
+	}
+}
+
+func TestRenderIssuePrompt(t *testing.T) {
+	r := &ReviewUsecase{cfg: &config.Config{PromptsDir: "../../prompts", BotHandle: "elyoraa"}}
+	j := &domain.Review{
+		Owner:          "o",
+		Repo:           "r",
+		PRNumber:       7,
+		Title:          "Big refactor request",
+		Author:         "alice",
+		Body:           "Please rework the whole queue system",
+		TriggerComment: "@elyoraa what do you think?",
+		RepoAvailable:  true,
+	}
+	thread := []github.IssueComment{
+		{Author: "alice", Body: "@elyoraa what do you think?", CreatedAt: time.Now()},
+		{Author: "elyoraa[bot]", Body: "This is too big; proposed breakdown…", CreatedAt: time.Now(), IsBot: true},
+		{Author: "alice", Body: "go ahead", CreatedAt: time.Now()},
+	}
+
+	out, err := r.renderIssuePrompt(j, thread)
+	if err != nil {
+		t.Fatalf("renderIssuePrompt: %v", err)
+	}
+	for _, want := range []string{"Big refactor request", "go ahead", "elyoraa[bot]", "breakdown", "Discussion Thread"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("prompt missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "<no value>") {
+		t.Fatalf("prompt has unresolved template keys:\n%s", out)
 	}
 }

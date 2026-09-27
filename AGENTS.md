@@ -67,7 +67,8 @@ The image is Debian-based because a host-provided `devin` binary is usually glib
   - `pull_request_review_comment` (`created`, `edited`) — if the comment mentions the bot, trigger rereview.
   - `issues` (`opened`, `edited`, `reopened`) — if the issue body mentions the bot, trigger issue analysis.
 - Draft PRs and `synchronize` pushes are ignored.
-- Issue analysis spawns Devin without a worktree and posts the response as an issue comment.
+- Issue analysis (`prompts/issue.md`) summarizes the issue, suggests approaches, proposes a breakdown when the scope is too big, and reads the full comment thread (bounded to 50 comments / 48KB) so prior bot replies and human acceptance shape the response. It uses a repo worktree when the repo is pre-cloned, else a temp dir.
+- When a human explicitly accepts a proposed breakdown, the reply ends with a `create_issues` JSON block; `processIssue` strips it, creates the issues via the GitHub App, and appends links under the posted comment. Labels are matched case-insensitively against repo labels; a curated vocabulary (plus the `BOT_HANDLE` tag) is auto-created when missing.
 - Rereview is triggered by any mention of the bot handle (`BOT_HANDLE`, default `elyoraa`).
 - Draft PRs and `synchronize` pushes are ignored.
 - Rereview is triggered by a PR comment mentioning the bot handle (`BOT_HANDLE`, default `elyoraa`) with a rereview keyword (`rereview`, `re-review`, `review again`, `recheck`, `check again`).
