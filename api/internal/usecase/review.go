@@ -137,7 +137,7 @@ func (r *ReviewUsecase) Process(ctx context.Context, j domain.Review) (attempts 
 		return attempts, fmt.Errorf("render prompt: %w", err)
 	}
 
-	out, attempts, err := r.runDevin(ctx, &j, worktree, prompt)
+	out, attempts, err := r.runDevin(ctx, &j, worktree, prompt, validateReviewOutput)
 	if err != nil {
 		if ctx.Err() == context.Canceled {
 			r.updatePending(context.Background(), &j, "Review cancelled: a newer push replaced this one.")
@@ -149,8 +149,10 @@ func (r *ReviewUsecase) Process(ctx context.Context, j domain.Review) (attempts 
 		return attempts, fmt.Errorf("run devin: %w", err)
 	}
 
-	review, err := r.parseOutput(out)
+	review, err := parseReviewOutput(out)
 	if err != nil {
+		// Should not happen — runDevin validates the output — but never
+		// approve on a parse failure.
 		r.updatePending(ctx, &j, "Review failed: could not parse Devin output.")
 		r.markFailed(ctx, j, "parse output")
 		return attempts, fmt.Errorf("parse output: %w", err)
@@ -329,7 +331,7 @@ func (r *ReviewUsecase) processIssue(ctx context.Context, j *domain.Review) (att
 		return attempts, fmt.Errorf("render issue prompt: %w", err)
 	}
 
-	out, attempts, err := r.runDevin(ctx, j, workdir, prompt)
+	out, attempts, err := r.runDevin(ctx, j, workdir, prompt, nil)
 	if err != nil {
 		if ctx.Err() == context.Canceled {
 			r.updatePending(context.Background(), j, "Issue analysis cancelled.")
@@ -566,9 +568,12 @@ const maxOutputLogBytes = 8192
 const devinPreflightTimeout = 60 * time.Second
 
 // runDevin invokes the Devin CLI, retrying transient failures with exponential
-// backoff. It returns the combined output, the number of attempts used, and
-// the final error (if any).
-func (r *ReviewUsecase) runDevin(ctx context.Context, j *domain.Review, worktree, prompt string) (string, int, error) {
+// backoff. When validate is non-nil, a zero-exit run whose output fails
+// validation is retried as a transient failure — a malformed response must
+// never silently reach the caller (e.g. an unparseable review approving a PR).
+// It returns the combined output, the number of attempts used, and the final
+// error (if any).
+func (r *ReviewUsecase) runDevin(ctx context.Context, j *domain.Review, worktree, prompt string, validate func(string) error) (string, int, error) {
 	tmpDir, err := os.MkdirTemp("", "elyoraa-review-*")
 	if err != nil {
 		return "", 0, err
@@ -614,8 +619,13 @@ func (r *ReviewUsecase) runDevin(ctx context.Context, j *domain.Review, worktree
 		if runErr == nil {
 			log.Info("devin run started")
 			out, runErr = r.execDevin(attemptCtx, worktree, args, tmpDir)
-			if runErr != nil {
+			switch {
+			case runErr != nil:
 				transient, reason = classifyDevinError(runErr, attemptCtx, out)
+			case validate != nil:
+				if verr := validate(out); verr != nil {
+					runErr, transient, reason = verr, true, "malformed output"
+				}
 			}
 		}
 		cancel()
@@ -854,17 +864,42 @@ func isSecretFlag(a string) bool {
 
 var jsonBlockRegex = regexp.MustCompile("(?s)```json\\s*(.*?)\\s*```")
 
-func (r *ReviewUsecase) parseOutput(out string) (*domain.Output, error) {
+// parseReviewOutput extracts the last ```json block from Devin's output. It
+// is strict: a missing block or unparseable JSON is an error — treating prose
+// as "no comments" would silently approve the PR.
+func parseReviewOutput(out string) (*domain.Output, error) {
 	matches := jsonBlockRegex.FindAllStringSubmatch(out, -1)
 	if len(matches) == 0 {
-		return &domain.Output{Summary: strings.TrimSpace(out), Comments: nil}, nil
+		return nil, errors.New("no json block in devin output")
 	}
 	last := matches[len(matches)-1][1]
 	var result domain.Output
 	if err := json.Unmarshal([]byte(last), &result); err != nil {
-		return &domain.Output{Summary: strings.TrimSpace(out), Comments: nil}, nil
+		return nil, fmt.Errorf("invalid review json: %w", err)
 	}
 	return &result, nil
+}
+
+// validateReviewOutput rejects Devin runs that produced unusable review
+// output, so the retry loop can try again instead of approving blindly: the
+// JSON must parse, and an approval (zero comments) must come with the audit
+// trail proving the review actually ran.
+func validateReviewOutput(out string) error {
+	review, err := parseReviewOutput(out)
+	if err != nil {
+		return err
+	}
+	if len(review.Comments) == 0 && len(review.PassesCompleted) == 0 && len(review.FilesReviewed) == 0 {
+		return errors.New("review approved without audit fields (passes_completed/files_reviewed empty)")
+	}
+	return nil
+}
+
+// validateReconcileOutput rejects reconcile runs that produced no parseable
+// JSON block.
+func validateReconcileOutput(out string) error {
+	_, err := parseReconcileOutput(out)
+	return err
 }
 
 // reconcileFindings runs a focused second Devin pass that re-verifies each
@@ -889,7 +924,7 @@ func (r *ReviewUsecase) reconcileFindings(ctx context.Context, j *domain.Review,
 		return
 	}
 
-	out, _, err := r.runDevin(ctx, j, worktree, prompt)
+	out, _, err := r.runDevin(ctx, j, worktree, prompt, validateReconcileOutput)
 	if err != nil {
 		if ctx.Err() != nil {
 			return // job cancelled or deadline — don't fabricate statuses

@@ -214,6 +214,35 @@ func TestRenderReconcilePrompt(t *testing.T) {
 	}
 }
 
+func TestValidateReviewOutput(t *testing.T) {
+	// Prose output — the silent-approve bug — must be rejected.
+	if err := validateReviewOutput("looks fine, nothing to report"); err == nil {
+		t.Fatal("prose output should fail validation")
+	}
+
+	// Broken JSON must be rejected.
+	if err := validateReviewOutput("```json\n{not json}\n```"); err == nil {
+		t.Fatal("invalid json should fail validation")
+	}
+
+	// An approval with no audit trail is suspicious — reject.
+	if err := validateReviewOutput("```json\n{\"summary\": \"ok\", \"comments\": []}\n```"); err == nil {
+		t.Fatal("approval without audit fields should fail validation")
+	}
+
+	// A real approval with passes/files filled is fine.
+	good := "```json\n{\"summary\": \"clean\", \"comments\": [], \"passes_completed\": [\"correctness\"], \"files_reviewed\": [\"a.go\"]}\n```"
+	if err := validateReviewOutput(good); err != nil {
+		t.Fatalf("valid approval rejected: %v", err)
+	}
+
+	// A review with comments doesn't need audit fields.
+	withComments := "```json\n{\"summary\": \"issues\", \"comments\": [{\"path\": \"a.go\", \"line\": 1, \"severity\": \"high\", \"body\": \"x\"}]}\n```"
+	if err := validateReviewOutput(withComments); err != nil {
+		t.Fatalf("valid findings rejected: %v", err)
+	}
+}
+
 func TestParseReconcileOutput(t *testing.T) {
 	out := "Analysis done.\n\n```json\n{\"prior_findings_status\": [{\"path\": \"a.go\", \"line\": 10, \"status\": \"still_present\"}], \"additional_comments\": [{\"path\": \"a.go\", \"line\": 12, \"severity\": \"high\", \"body\": \"still broken\"}]}\n```\n"
 	rec, err := parseReconcileOutput(out)
