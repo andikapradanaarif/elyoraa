@@ -86,7 +86,12 @@ Follow these steps in order.
 
 6. **Verify before you write.**
    - For every finding, trace the actual code path to confirm it is
-     real — do not report hypothetical issues.
+     real or plausibly reachable under conditions this project actually
+     runs in. Grounded hypotheticals are fine ("this breaks if a caller
+     passes X, and callers like Y exist") — but do not report issues that
+     require conditions the repository never encounters (unsupported
+     language/library versions, platforms it doesn't run on, inputs no
+     caller can produce).
    - Re-check severity. Anything that can corrupt data, crash a
      production path, bypass auth, or leak a secret is HIGH — even if
      the diff is one line. Ask yourself for each finding: "is this
@@ -115,12 +120,13 @@ Follow these steps in order.
 - **The `comments` array decides the outcome.** If `comments` is empty the PR is APPROVED. If it contains even one entry the PR is marked REQUEST_CHANGES. Therefore:
   - Every finding that must be fixed before merge MUST be an entry in `comments` — never mention a real issue only in `summary`. An issue written in `summary` but omitted from `comments` is silently treated as "no issue" and the PR is approved.
   - If a finding is real but you would still approve the PR with it (nice-to-have, optional polish), do NOT put it in `comments` — mention it briefly in `summary` or `follow_ups` instead.
-- **MEDIUM** = concrete defect that should be fixed before merge: a real edge case that produces wrong behavior, a missing error/permission check on a new path, a contract mismatch with the spec or callers. Must be verifiable by tracing the code — no hypotheticals.
+- **MEDIUM** = concrete defect that should be fixed before merge: a real edge case that produces wrong behavior, a missing error/permission check on a new path, a contract mismatch with the spec or callers. Must be verifiable by tracing the code — either the defect triggers today, or it triggers under a plausible condition this project actually faces (not a hypothetical requiring versions, platforms, or usage the repo doesn't have).
 - **LOW** = small, concrete issue worth fixing now (wrong log level, misleading name on new code, missing nil-guard on a newly added dereference). Do NOT report:
   - Speculative improvements ("could be more efficient", "consider caching")
   - "This package/API is old or deprecated" unless the deprecated usage in this diff causes a concrete bug or security issue _and_ the project actually uses that API — a newer version existing is not a finding
   - Stylistic preferences or alternative approaches
-  - Anything you cannot point to and say "this specific line produces this specific wrong behavior"
+  - Hypotheticals requiring conditions the project doesn't have — e.g. "breaks on very old versions", "fails on Windows", "races if used concurrently from N goroutines" when the code path is single-threaded by design, or compatibility with libraries the repo doesn't use
+  - Anything you cannot point to and say "this specific line produces this specific wrong behavior" (or a specific plausible scenario in this project's real usage)
 - **HIGH severity issues** (security vulnerabilities, data loss risks, crashes in production paths, authz bypasses, secret leaks) MUST be caught in this review. Do not assume a diff is too small to contain one — check explicitly. If a later pass or a human finds a HIGH you missed, this review failed. Flag each with `[HIGH]` prefix in the comment body and explain the concrete impact.
 - **Do NOT expand scope.** If a finding would require:
   - Large refactors across multiple files
