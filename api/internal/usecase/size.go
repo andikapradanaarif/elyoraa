@@ -1,8 +1,11 @@
 package usecase
 
 import (
+	"sort"
 	"strings"
 
+	"github.com/andikapradanaarif/elyoraa/internal/domain"
+	"github.com/andikapradanaarif/elyoraa/internal/repository/queue"
 	"github.com/andikapradanaarif/elyoraa/internal/service/github"
 )
 
@@ -48,6 +51,79 @@ func (s prSize) tooBig(budgetMin int) bool {
 		return false
 	}
 	return s.EstMinutes > budgetMin || s.Truncated
+}
+
+// estimateFromCounts computes a coarse estimate from the size counters GitHub
+// embeds in webhook payloads (no per-file data, so generated files are
+// included). changedFiles > maxFiles marks the estimate as truncated — a
+// file list that large can't be fully fetched or reviewed anyway.
+func estimateFromCounts(additions, deletions, changedFiles, linesPerMin, maxFiles int) prSize {
+	if linesPerMin <= 0 {
+		linesPerMin = 100
+	}
+	lines := additions + deletions
+	return prSize{
+		Files:      changedFiles,
+		Additions:  additions,
+		Deletions:  deletions,
+		Truncated:  maxFiles > 0 && changedFiles > maxFiles,
+		EstMinutes: (lines + linesPerMin - 1) / linesPerMin,
+	}
+}
+
+// refinedEstimate recomputes the enqueue-time estimate with per-file data.
+// Since enqueueEst = enqueueLines/rate, multiplying by refined/enqueued
+// yields refined/rate — the same estimate expressed in the enqueue-time
+// rate's units, with no need to plumb the rate into the worker.
+func refinedEstimate(info *github.PRInfo, j *domain.Review, fallbackLinesPerMin int) prSize {
+	s := estimatePRSize(info, fallbackLinesPerMin)
+	lines := s.Additions + s.Deletions
+	if j.SizeLines > 0 && j.SizeEstMinutes > 0 {
+		s.EstMinutes = (j.SizeEstMinutes*lines + j.SizeLines - 1) / j.SizeLines
+	}
+	return s
+}
+
+// Calibration constants for the empirical review rate.
+const (
+	calibrationWindow  = 30 // recent completed reviews to sample
+	calibrationMinJobs = 5  // fewer samples than this → use the configured rate
+	calibrationMinRate = 30 // lines/min sanity floor (very slow reviewer)
+	calibrationMaxRate = 400
+)
+
+// calibratedLinesPerMinute derives the lines-per-minute rate from observed
+// durations of recently completed review jobs, so PR_REVIEW_BUDGET_MINUTES
+// tracks real execution time on this deployment rather than a guessed
+// constant. Job records are most-recently-updated first. Returns fallback
+// until enough samples exist.
+func calibratedLinesPerMinute(records []queue.JobRecord, fallback int) int {
+	rates := make([]int, 0, calibrationWindow)
+	for _, rec := range records {
+		if len(rates) >= calibrationWindow {
+			break
+		}
+		// Only completed full reviews calibrate the rate: split/issue jobs
+		// have a different cost profile and failed/cancelled runs skew it.
+		if rec.Status != queue.JobStatusCompleted ||
+			(rec.Type != "" && rec.Type != "review") ||
+			rec.DurationSeconds <= 0 ||
+			rec.Job.SizeLines <= 0 {
+			continue
+		}
+		if rate := int(float64(rec.Job.SizeLines) / (float64(rec.DurationSeconds) / 60)); rate > 0 {
+			rates = append(rates, rate)
+		}
+	}
+	if len(rates) < calibrationMinJobs {
+		if fallback <= 0 {
+			fallback = 100
+		}
+		return fallback
+	}
+	sort.Ints(rates)
+	med := rates[len(rates)/2]
+	return min(max(med, calibrationMinRate), calibrationMaxRate)
 }
 
 // generatedPathMarkers are path fragments that mark files as generated or

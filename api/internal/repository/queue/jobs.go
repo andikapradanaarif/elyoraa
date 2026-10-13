@@ -41,8 +41,12 @@ type JobRecord struct {
 	Attempts   int           `json:"attempts"`
 	Job        domain.Review `json:"-"` // stored for manual retry
 	EnqueuedAt time.Time     `json:"enqueued_at"`
-	UpdatedAt  time.Time     `json:"updated_at"`
+	StartedAt  *time.Time    `json:"started_at,omitempty"`
 	FinishedAt *time.Time    `json:"finished_at,omitempty"`
+	// DurationSeconds is execution time (pickup → finish), excluding queue
+	// wait. Populated on completion for rate calibration.
+	DurationSeconds int64 `json:"duration_seconds,omitempty"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 // jobRecordWire is the on-disk representation including the full job payload.
@@ -135,7 +139,11 @@ func (m *MemoryJobTracker) Enqueued(_ context.Context, j domain.Review) {
 }
 
 func (m *MemoryJobTracker) Started(_ context.Context, j domain.Review) {
-	m.upsert(j, func(r *JobRecord) { r.Status = JobStatusProcessing })
+	m.upsert(j, func(r *JobRecord) {
+		r.Status = JobStatusProcessing
+		now := time.Now()
+		r.StartedAt = &now
+	})
 }
 
 func (m *MemoryJobTracker) Completed(_ context.Context, j domain.Review, attempts int) {
@@ -145,6 +153,9 @@ func (m *MemoryJobTracker) Completed(_ context.Context, j domain.Review, attempt
 		r.Attempts = attempts
 		now := time.Now()
 		r.FinishedAt = &now
+		if r.StartedAt != nil {
+			r.DurationSeconds = int64(now.Sub(*r.StartedAt).Seconds())
+		}
 	})
 }
 
@@ -251,7 +262,11 @@ func (t *BoltJobTracker) Enqueued(_ context.Context, j domain.Review) {
 }
 
 func (t *BoltJobTracker) Started(_ context.Context, j domain.Review) {
-	t.upsert(j, func(r *JobRecord) { r.Status = JobStatusProcessing })
+	t.upsert(j, func(r *JobRecord) {
+		r.Status = JobStatusProcessing
+		now := time.Now()
+		r.StartedAt = &now
+	})
 }
 
 func (t *BoltJobTracker) Completed(_ context.Context, j domain.Review, attempts int) {
@@ -261,6 +276,9 @@ func (t *BoltJobTracker) Completed(_ context.Context, j domain.Review, attempts 
 		r.Attempts = attempts
 		now := time.Now()
 		r.FinishedAt = &now
+		if r.StartedAt != nil {
+			r.DurationSeconds = int64(now.Sub(*r.StartedAt).Seconds())
+		}
 	})
 }
 

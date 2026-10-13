@@ -3,9 +3,11 @@ package usecase
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/andikapradanaarif/elyoraa/internal/config"
 	"github.com/andikapradanaarif/elyoraa/internal/domain"
+	"github.com/andikapradanaarif/elyoraa/internal/repository/queue"
 	"github.com/andikapradanaarif/elyoraa/internal/service/github"
 )
 
@@ -44,6 +46,23 @@ func TestEstimatePRSizeExcludesGenerated(t *testing.T) {
 	}
 	if s.EstMinutes != 1 {
 		t.Fatalf("EstMinutes = %d, want 1", s.EstMinutes)
+	}
+}
+
+func TestEstimateFromCounts(t *testing.T) {
+	// Webhook-payload counters: no per-file data, generated files included.
+	s := estimateFromCounts(1200, 400, 12, 100, 50)
+	if s.Files != 12 || s.EstMinutes != 16 {
+		t.Fatalf("bad estimate: %+v", s)
+	}
+	if !s.tooBig(15) {
+		t.Fatal("1600 lines should exceed 15min budget")
+	}
+
+	// File count over the fetch cap counts as truncated even with few lines.
+	s = estimateFromCounts(200, 100, 60, 100, 50)
+	if !s.Truncated || !s.tooBig(15) {
+		t.Fatalf("60 files > 50 cap should be too big: %+v", s)
 	}
 }
 
@@ -90,6 +109,102 @@ func TestClassifyOversize(t *testing.T) {
 				t.Fatalf("classifyOversize(%q) = %v, want %v", tc.trigger, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestCalibratedLinesPerMinute(t *testing.T) {
+	doneAt := time.Now()
+	rec := func(lines int, secs int64, status, typ string) queue.JobRecord {
+		st := doneAt.Add(-time.Duration(secs) * time.Second)
+		return queue.JobRecord{
+			Status:          status,
+			Type:            typ,
+			DurationSeconds: secs,
+			StartedAt:       &st,
+			FinishedAt:      &doneAt,
+			Job:             domain.Review{SizeLines: lines},
+		}
+	}
+
+	// No history → fallback.
+	if got := calibratedLinesPerMinute(nil, 100); got != 100 {
+		t.Fatalf("empty history should use fallback, got %d", got)
+	}
+	if got := calibratedLinesPerMinute(nil, 0); got != 100 {
+		t.Fatalf("empty history with zero fallback should use default, got %d", got)
+	}
+
+	// Fewer than calibrationMinJobs samples → fallback even with data.
+	few := []queue.JobRecord{rec(1000, 600, queue.JobStatusCompleted, "")}
+	if got := calibratedLinesPerMinute(few, 100); got != 100 {
+		t.Fatalf("too few samples should use fallback, got %d", got)
+	}
+
+	// 5 completed reviews at 100 lines/min → calibrated rate 100.
+	var recs []queue.JobRecord
+	for i := 0; i < 6; i++ {
+		recs = append(recs, rec(1000, 600, queue.JobStatusCompleted, ""))
+	}
+	if got := calibratedLinesPerMinute(recs, 5); got != 100 {
+		t.Fatalf("calibrated rate = %d, want 100", got)
+	}
+
+	// Slow deployment: 1000 lines in 20 min → 50 lpm.
+	recs = nil
+	for i := 0; i < 6; i++ {
+		recs = append(recs, rec(1000, 1200, queue.JobStatusCompleted, ""))
+	}
+	if got := calibratedLinesPerMinute(recs, 100); got != 50 {
+		t.Fatalf("calibrated rate = %d, want 50", got)
+	}
+
+	// Noise is filtered: split/issue/failed jobs and zero-line payloads.
+	recs = nil
+	for i := 0; i < 6; i++ {
+		recs = append(recs, rec(1000, 600, queue.JobStatusCompleted, ""))
+	}
+	recs = append(recs,
+		rec(9000, 30, queue.JobStatusCompleted, "split"),
+		rec(9000, 30, queue.JobStatusCompleted, "issue"),
+		rec(9000, 30, queue.JobStatusFailed, ""),
+		rec(0, 600, queue.JobStatusCompleted, ""),
+	)
+	if got := calibratedLinesPerMinute(recs, 5); got != 100 {
+		t.Fatalf("noise should be filtered, got %d", got)
+	}
+
+	// Outlier clamp: insanely fast samples clamp to the ceiling.
+	recs = nil
+	for i := 0; i < 6; i++ {
+		recs = append(recs, rec(100000, 1, queue.JobStatusCompleted, ""))
+	}
+	if got := calibratedLinesPerMinute(recs, 100); got != calibrationMaxRate {
+		t.Fatalf("should clamp to %d, got %d", calibrationMaxRate, got)
+	}
+}
+
+func TestRefinedEstimate(t *testing.T) {
+	// Enqueue estimate came from raw webhook counters (generated included);
+	// per-file data refines it by the same ratio.
+	j := &domain.Review{SizeEstMinutes: 20, SizeLines: 2000}
+	info := &github.PRInfo{Files: []*github.FileInfo{
+		{Path: "a.go", Additions: 100, Deletions: 100}, // real: 200 lines
+		{Path: "go.sum", Additions: 900, Deletions: 900},
+	}}
+	s := refinedEstimate(info, j, 100)
+	// 20min * 200/2000 = 2min — generated lines dominated the raw count.
+	if s.EstMinutes != 2 {
+		t.Fatalf("refined EstMinutes = %d, want 2", s.EstMinutes)
+	}
+	if s.tooBig(15) {
+		t.Fatal("should demote: refined estimate under budget")
+	}
+
+	// No enqueue stats → keep the fallback-rate estimate.
+	j2 := &domain.Review{}
+	s = refinedEstimate(info, j2, 100)
+	if s.EstMinutes != 2 {
+		t.Fatalf("fallback EstMinutes = %d, want 2", s.EstMinutes)
 	}
 }
 

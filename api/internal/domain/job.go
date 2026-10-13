@@ -18,10 +18,13 @@ type Review struct {
 	Author           string
 	Title            string
 	Body             string
-	Type             string // "review" (default) or "issue"
+	Type             string // "review" (default), "issue", or "split"
 	TriggerComment   string // the comment that triggered this job, if any
 	RepoAvailable    bool   // whether the repo was cloned and available for analysis
 	PendingCommentID int64  // issue comment ID for "Review in progress…"
+	SplitCreate      bool   // split job: a human accepted the proposal — emit create_issues
+	SizeEstMinutes   int    // estimated review effort at enqueue time
+	SizeLines        int    // changed lines that fed the estimate (calibration + refine)
 	EnqueuedAt       time.Time
 }
 
@@ -69,6 +72,11 @@ type Output struct {
 // IsIssue reports whether this is an issue analysis job (not a PR review).
 func (r *Review) IsIssue() bool {
 	return r.Type == "issue"
+}
+
+// IsSplit reports whether this is a split-proposal job for an oversize PR.
+func (r *Review) IsSplit() bool {
+	return r.Type == "split"
 }
 
 // IsBot returns true if the author looks like a bot.

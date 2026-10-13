@@ -36,8 +36,22 @@ func (d *Dedup) TryStart(parent context.Context, j domain.Review) (context.Conte
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	if _, ok := d.running[j.JobKey]; ok {
-		return nil, nil, false
+	if st, ok := d.running[j.JobKey]; ok {
+		// A review request supersedes a queued/running split proposal for the
+		// same SHA — an explicit "review anyway" must not be dropped as a
+		// duplicate while the gate's proposal is still pending. No key-level
+		// tombstone is set: the superseded instance is rejected by the
+		// delivery-ID check in BindCancel, and the new job must still bind.
+		if st.job == nil || !st.job.IsSplit() || j.IsSplit() || j.IsIssue() {
+			return nil, nil, false
+		}
+		if j.PendingCommentID == 0 {
+			j.PendingCommentID = st.job.PendingCommentID
+		}
+		for _, c := range st.cancels {
+			c()
+		}
+		delete(d.running, j.JobKey)
 	}
 	// Clear any tombstone for this exact key so a manual retry can bind again.
 	delete(d.replaced, j.JobKey)
@@ -66,32 +80,42 @@ func (d *Dedup) TryStart(parent context.Context, j domain.Review) (context.Conte
 // queued — the worker should skip it. Jobs unknown to the tracker (e.g.
 // recovered from a durable queue after restart) get a fresh state so they can
 // still be cancelled by a later replacement.
-func (d *Dedup) BindCancel(jobKey string, cancel context.CancelFunc) bool {
+func (d *Dedup) BindCancel(j domain.Review, cancel context.CancelFunc) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if _, ok := d.replaced[jobKey]; ok {
+	if _, ok := d.replaced[j.JobKey]; ok {
 		return false
 	}
-	st, ok := d.running[jobKey]
+	st, ok := d.running[j.JobKey]
+	if ok && st.job != nil && st.job.DeliveryID != "" && j.DeliveryID != "" && st.job.DeliveryID != j.DeliveryID {
+		// The slot was taken over by a different job instance (same-key
+		// supersede) — this stale instance must not bind or run.
+		return false
+	}
 	if !ok {
 		st = &state{}
-		d.running[jobKey] = st
+		d.running[j.JobKey] = st
 	}
 	st.cancels = append(st.cancels, cancel)
 	return true
 }
 
 // Done marks a job as complete and cancels its internal contexts if it is still tracked.
-func (d *Dedup) Done(jobKey string) {
+// A superseded instance must not clear the superseding job's slot, so the
+// running state is only removed when the delivery IDs match (or are unknown).
+func (d *Dedup) Done(j domain.Review) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if st, ok := d.running[jobKey]; ok {
+	if st, ok := d.running[j.JobKey]; ok {
+		if st.job != nil && st.job.DeliveryID != "" && j.DeliveryID != "" && st.job.DeliveryID != j.DeliveryID {
+			return // slot owned by a superseding job — leave its state untouched
+		}
 		for _, c := range st.cancels {
 			c()
 		}
-		delete(d.running, jobKey)
+		delete(d.running, j.JobKey)
 	}
-	delete(d.replaced, jobKey)
+	delete(d.replaced, j.JobKey)
 }
 
 // Active returns the number of in-flight jobs.

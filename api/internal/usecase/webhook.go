@@ -158,6 +158,14 @@ func (u *WebhookUsecase) handlePullRequest(ctx context.Context, deliveryID strin
 		EnqueuedAt:     time.Now(),
 	}
 
+	// The pull_request payload already carries the size counters — the gate
+	// costs no extra API call.
+	u.applySizeGate(ctx, &review, nil, sizeStats{
+		additions:    pr.GetAdditions(),
+		deletions:    pr.GetDeletions(),
+		changedFiles: pr.GetChangedFiles(),
+	})
+
 	return u.enqueueReview(ctx, review, u.prWebhookEvent(deliveryID, prEvent, body, "received", ""))
 }
 
@@ -241,7 +249,7 @@ func (u *WebhookUsecase) handleIssueComment(ctx context.Context, deliveryID stri
 	// If the comment is on a PR, trigger a rereview.
 	if issue.IsPullRequest() {
 		prCtx, cancel := context.WithTimeout(ctx, u.cfg.CommentTimeout)
-		prInfo, err := u.gh.GetPR(prCtx, instID, owner, repoName, issueNumber, 0, 0)
+		prInfo, err := u.gh.GetPR(prCtx, instID, owner, repoName, issueNumber, 0, u.cfg.MaxChangedFiles)
 		cancel()
 		if err != nil {
 			_ = u.store.Record(ctx, u.commentWebhookEvent(deliveryID, cmEvent, body, "failed", fmt.Sprintf("get pr: %v", err)))
@@ -267,6 +275,9 @@ func (u *WebhookUsecase) handleIssueComment(ctx context.Context, deliveryID stri
 			TriggerComment: comment.GetBody(),
 			EnqueuedAt:     time.Now(),
 		}
+
+		// The fetch above already produced per-file stats — the gate is exact.
+		u.applySizeGate(ctx, &review, prInfo, sizeStats{})
 
 		return u.enqueueReview(ctx, review, u.commentWebhookEvent(deliveryID, cmEvent, body, "received", ""))
 	}
@@ -304,6 +315,73 @@ func (u *WebhookUsecase) isRereviewRequest(body string) bool {
 	return true
 }
 
+// sizeStats carries the PR size counters GitHub embeds in webhook event
+// payloads — no API call needed.
+type sizeStats struct {
+	additions    int
+	deletions    int
+	changedFiles int
+}
+
+// applySizeGate converts an oversize review job into a split-proposal job at
+// enqueue time, so the verdict (and its comment) isn't delayed by queue wait.
+// The trigger comment decides the outcome: explicit review keywords keep it a
+// review job, acceptance keywords turn it into a split job in create mode,
+// anything else proposes the split. An empty payload without prInfo falls
+// back to one GetPR call; a fetch failure leaves the job as a review.
+func (u *WebhookUsecase) applySizeGate(ctx context.Context, r *domain.Review, prInfo *github.PRInfo, st sizeStats) {
+	if !u.cfg.PRSizeGate || r.IsIssue() {
+		return
+	}
+
+	// The rate is calibrated from recently completed reviews so the budget
+	// tracks real execution time; it falls back to config until then.
+	lpm := u.cfg.PRLinesPerMinute
+	if t := u.q.Tracker(); t != nil {
+		lpm = calibratedLinesPerMinute(t.List(ctx), lpm)
+	}
+
+	var size prSize
+	switch {
+	case prInfo != nil:
+		size = estimatePRSize(prInfo, lpm)
+	case st.additions+st.deletions+st.changedFiles > 0:
+		size = estimateFromCounts(st.additions, st.deletions, st.changedFiles, lpm, u.cfg.MaxChangedFiles)
+	default:
+		gctx, cancel := context.WithTimeout(ctx, u.cfg.CommentTimeout)
+		info, err := u.gh.GetPR(gctx, r.InstallationID, r.Owner, r.Repo, r.PRNumber, 0, u.cfg.MaxChangedFiles)
+		cancel()
+		if err != nil {
+			slog.Warn("size gate: could not fetch PR stats, proceeding as review",
+				"owner", r.Owner, "repo", r.Repo, "pr", r.PRNumber, "error", err)
+			return
+		}
+		size = estimatePRSize(info, lpm)
+	}
+
+	r.SizeEstMinutes = size.EstMinutes
+	r.SizeLines = size.Additions + size.Deletions
+	if !size.tooBig(u.cfg.PRReviewBudgetMinutes) {
+		return
+	}
+
+	slog.Info("oversize PR at enqueue",
+		"owner", r.Owner, "repo", r.Repo, "pr", r.PRNumber,
+		"files", size.Files, "additions", size.Additions, "deletions", size.Deletions,
+		"est_minutes", size.EstMinutes, "budget_minutes", u.cfg.PRReviewBudgetMinutes,
+		"truncated", size.Truncated)
+
+	switch classifyOversize(r.TriggerComment) {
+	case oversizeReview:
+		// Human explicitly asked for the review — keep it a review job.
+	case oversizeCreate:
+		r.Type = "split"
+		r.SplitCreate = true
+	default:
+		r.Type = "split"
+	}
+}
+
 func (u *WebhookUsecase) enqueueReview(ctx context.Context, review domain.Review, evt *domain.WebhookEvent) (domain.Review, error) {
 	// Skip bot-authored PRs for auto-reviews, but allow explicit mentions
 	// (rereview/issue analysis) to proceed even if the PR was bot-authored.
@@ -331,6 +409,12 @@ func (u *WebhookUsecase) enqueueReview(ctx context.Context, review domain.Review
 	// Post the in-progress comment if we don't already have one.
 	if job.PendingCommentID == 0 {
 		pendingBody := "Review in progress…\n\n<!-- elyoraa-in-progress -->"
+		if job.IsSplit() {
+			pendingBody = fmt.Sprintf(
+				"This PR looks too big for a single review (estimated ~%d min vs the %d min budget). Drafting a split proposal…\n\n<!-- elyoraa-in-progress -->",
+				job.SizeEstMinutes, u.cfg.PRReviewBudgetMinutes,
+			)
+		}
 		pendingCtx, cancel := context.WithTimeout(context.Background(), u.cfg.CommentTimeout)
 		id, err := u.gh.PostPendingComment(pendingCtx, job.InstallationID, job.Owner, job.Repo, job.PRNumber, pendingBody)
 		cancel()
@@ -349,7 +433,7 @@ func (u *WebhookUsecase) enqueueReview(ctx context.Context, review domain.Review
 				"Review queued, will run later.\n\n<!-- elyoraa-in-progress -->")
 			cancel()
 		}
-		u.d.Done(job.JobKey)
+		u.d.Done(*job)
 		_ = u.store.UpdateStatus(ctx, review.DeliveryID, "dropped", "queue full")
 		return *job, ErrQueueFull
 	}
@@ -490,6 +574,12 @@ func (u *WebhookUsecase) handlePullRequestReview(ctx context.Context, deliveryID
 		EnqueuedAt:     time.Now(),
 	}
 
+	u.applySizeGate(ctx, &r, nil, sizeStats{
+		additions:    pr.GetAdditions(),
+		deletions:    pr.GetDeletions(),
+		changedFiles: pr.GetChangedFiles(),
+	})
+
 	_ = u.store.Record(ctx, &domain.WebhookEvent{
 		DeliveryID: deliveryID, EventType: "pull_request_review",
 		Action: action, Owner: owner, Repo: repoName, PRNumber: pr.GetNumber(),
@@ -578,6 +668,12 @@ func (u *WebhookUsecase) handlePullRequestReviewComment(ctx context.Context, del
 		TriggerComment: comment.GetBody(),
 		EnqueuedAt:     time.Now(),
 	}
+
+	u.applySizeGate(ctx, &r, nil, sizeStats{
+		additions:    pr.GetAdditions(),
+		deletions:    pr.GetDeletions(),
+		changedFiles: pr.GetChangedFiles(),
+	})
 
 	_ = u.store.Record(ctx, &domain.WebhookEvent{
 		DeliveryID: deliveryID, EventType: "pull_request_review_comment",
@@ -691,7 +787,7 @@ func (u *WebhookUsecase) RetryJob(ctx context.Context, key string) (domain.Revie
 		return domain.Review{}, ErrDuplicate
 	}
 	if !u.q.Submit(newCtx, *newJob) {
-		u.d.Done(job.JobKey)
+		u.d.Done(*newJob)
 		return domain.Review{}, ErrQueueFull
 	}
 	slog.Info("job retried",

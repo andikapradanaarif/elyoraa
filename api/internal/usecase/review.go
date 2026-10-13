@@ -49,7 +49,7 @@ func (r *ReviewUsecase) Process(ctx context.Context, j domain.Review) (attempts 
 
 	start := time.Now()
 	defer func() {
-		r.d.Done(j.JobKey)
+		r.d.Done(j)
 		if r.metrics != nil {
 			r.metrics.RecordDuration(time.Since(start))
 		}
@@ -71,7 +71,7 @@ func (r *ReviewUsecase) Process(ctx context.Context, j domain.Review) (attempts 
 	// PR actually terminates this run (including any backoff sleep).
 	jobCtx, jobCancel := context.WithCancel(ctx)
 	defer jobCancel()
-	if !r.d.BindCancel(j.JobKey, jobCancel) {
+	if !r.d.BindCancel(j, jobCancel) {
 		r.markStatus(ctx, j, "cancelled")
 		return attempts, queue.ErrJobCancelled
 	}
@@ -126,23 +126,19 @@ func (r *ReviewUsecase) Process(ctx context.Context, j domain.Review) (attempts 
 		return attempts, nil
 	}
 
-	// Size gate: when the estimated review effort exceeds the budget,
-	// post a PR-split proposal instead of a full review — unless the
-	// trigger comment explicitly asks for the review (or accepts a
-	// previous proposal, in which case the issues get created).
-	if r.cfg.PRSizeGate {
-		size := estimatePRSize(prInfo, r.cfg.PRLinesPerMinute)
+	// Split jobs were gated at enqueue from webhook counters, which include
+	// generated files. Re-verify with per-file stats: if the refined estimate
+	// fits the budget, run the normal review after all. The inverse never
+	// happens — per-file estimation only removes lines, so a job enqueued as
+	// a review can't secretly be oversize.
+	if j.IsSplit() {
+		size := refinedEstimate(prInfo, &j, r.cfg.PRLinesPerMinute)
 		if size.tooBig(r.cfg.PRReviewBudgetMinutes) {
-			switch classifyOversize(j.TriggerComment) {
-			case oversizeReview:
-				slog.Info("oversize PR: explicit review request, bypassing size gate",
-					"job", j.JobKey, "files", size.Files, "est_minutes", size.EstMinutes)
-			case oversizeCreate:
-				return r.processOversize(ctx, &j, worktree, prInfo, size, true)
-			default:
-				return r.processOversize(ctx, &j, worktree, prInfo, size, false)
-			}
+			return r.processOversize(ctx, &j, worktree, prInfo, size)
 		}
+		slog.Info("split job demoted to review: refined estimate under budget",
+			"job", j.JobKey, "files", size.Files, "est_minutes", size.EstMinutes)
+		r.updatePending(ctx, &j, "Review in progress…")
 	}
 
 	// Fetch the previous bot review now — a separate reconcile pass will
@@ -297,13 +293,19 @@ func (r *ReviewUsecase) markFailed(ctx context.Context, j domain.Review, msg str
 func (r *ReviewUsecase) processIssue(ctx context.Context, j *domain.Review) (attempts int, err error) {
 	attempts = 1
 	pendingBody := "Analyzing issue…\n\n<!-- elyoraa-in-progress -->"
-	pendingCtx, cancel := context.WithTimeout(context.Background(), r.cfg.CommentTimeout)
-	commentID, err := r.gh.PostPendingComment(pendingCtx, j.InstallationID, j.Owner, j.Repo, j.PRNumber, pendingBody)
-	cancel()
-	if err != nil {
-		slog.Warn("failed to post pending comment", "error", err)
+	if j.PendingCommentID != 0 {
+		editCtx, cancel := context.WithTimeout(context.Background(), r.cfg.CommentTimeout)
+		_ = r.gh.EditComment(editCtx, j.InstallationID, j.Owner, j.Repo, j.PendingCommentID, pendingBody)
+		cancel()
 	} else {
-		j.PendingCommentID = commentID
+		pendingCtx, cancel := context.WithTimeout(context.Background(), r.cfg.CommentTimeout)
+		commentID, err := r.gh.PostPendingComment(pendingCtx, j.InstallationID, j.Owner, j.Repo, j.PRNumber, pendingBody)
+		cancel()
+		if err != nil {
+			slog.Warn("failed to post pending comment", "error", err)
+		} else {
+			j.PendingCommentID = commentID
+		}
 	}
 
 	// Try to get a worktree so Devin can search the repo code.
@@ -520,22 +522,22 @@ func (r *ReviewUsecase) createIssues(ctx context.Context, j *domain.Review, prop
 // processOversize handles a PR that exceeds the review-time budget. Instead
 // of a full review it runs a single Devin pass that analyzes the diff and
 // proposes how to split the PR into smaller, reviewable pieces — posted as
-// the pending comment. When createMode is on (a human accepted a previous
+// the pending comment. When j.SplitCreate is set (a human accepted a previous
 // proposal) Devin may emit a create_issues block, which is turned into real
 // GitHub issues like processIssue does.
-func (r *ReviewUsecase) processOversize(ctx context.Context, j *domain.Review, worktree string, prInfo *github.PRInfo, size prSize, createMode bool) (attempts int, err error) {
+func (r *ReviewUsecase) processOversize(ctx context.Context, j *domain.Review, worktree string, prInfo *github.PRInfo, size prSize) (attempts int, err error) {
 	attempts = 1
 	slog.Info("oversize PR: skipping full review for split proposal",
 		"job", j.JobKey, "files", size.Files, "additions", size.Additions,
 		"deletions", size.Deletions, "generated_files", size.GeneratedFiles,
 		"est_minutes", size.EstMinutes, "budget_minutes", r.cfg.PRReviewBudgetMinutes,
-		"truncated", size.Truncated, "create_mode", createMode)
+		"truncated", size.Truncated, "create_mode", j.SplitCreate)
 
 	// PR conversation thread — in create mode the bot's earlier proposal and
 	// the human's acceptance live here.
 	thread := r.fetchIssueThread(ctx, j)
 
-	prompt, err := r.renderSplitPrompt(j, prInfo, size, createMode, thread)
+	prompt, err := r.renderSplitPrompt(j, prInfo, size, j.SplitCreate, thread)
 	if err != nil {
 		r.updatePending(ctx, j, "Review failed: could not render prompt.")
 		r.markFailed(ctx, *j, "render split prompt")
