@@ -39,6 +39,9 @@ type PRInfo struct {
 	Files       []*FileInfo
 	PatchText   string
 	PatchTooBig bool
+	// FilesTruncated is true when the changed-file list hit the maxFiles cap,
+	// so the real PR size is larger than what Files describes.
+	FilesTruncated bool
 }
 
 // FileInfo holds per-file diff data.
@@ -150,7 +153,11 @@ func (c *Client) GetPR(ctx context.Context, installationID int64, owner, repo st
 			return nil, fmt.Errorf("list files: %w", err)
 		}
 		files = append(files, pageFiles...)
-		if resp.NextPage == 0 || len(files) >= maxFiles {
+		if resp.NextPage == 0 {
+			break
+		}
+		if len(files) >= maxFiles {
+			info.FilesTruncated = true
 			break
 		}
 		page = resp.NextPage
@@ -159,6 +166,7 @@ func (c *Client) GetPR(ctx context.Context, installationID int64, owner, repo st
 	if len(files) > maxFiles {
 		files = files[:maxFiles]
 		info.PatchTooBig = true
+		info.FilesTruncated = true
 	}
 
 	var patchBuilder strings.Builder

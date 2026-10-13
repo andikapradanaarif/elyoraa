@@ -126,6 +126,25 @@ func (r *ReviewUsecase) Process(ctx context.Context, j domain.Review) (attempts 
 		return attempts, nil
 	}
 
+	// Size gate: when the estimated review effort exceeds the budget,
+	// post a PR-split proposal instead of a full review — unless the
+	// trigger comment explicitly asks for the review (or accepts a
+	// previous proposal, in which case the issues get created).
+	if r.cfg.PRSizeGate {
+		size := estimatePRSize(prInfo, r.cfg.PRLinesPerMinute)
+		if size.tooBig(r.cfg.PRReviewBudgetMinutes) {
+			switch classifyOversize(j.TriggerComment) {
+			case oversizeReview:
+				slog.Info("oversize PR: explicit review request, bypassing size gate",
+					"job", j.JobKey, "files", size.Files, "est_minutes", size.EstMinutes)
+			case oversizeCreate:
+				return r.processOversize(ctx, &j, worktree, prInfo, size, true)
+			default:
+				return r.processOversize(ctx, &j, worktree, prInfo, size, false)
+			}
+		}
+	}
+
 	// Fetch the previous bot review now — a separate reconcile pass will
 	// re-verify those findings AFTER the unbiased fresh review completes.
 	prevReview := r.fetchPreviousReview(ctx, &j)
@@ -496,6 +515,113 @@ func (r *ReviewUsecase) createIssues(ctx context.Context, j *domain.Review, prop
 		created = append(created, *ci)
 	}
 	return created
+}
+
+// processOversize handles a PR that exceeds the review-time budget. Instead
+// of a full review it runs a single Devin pass that analyzes the diff and
+// proposes how to split the PR into smaller, reviewable pieces — posted as
+// the pending comment. When createMode is on (a human accepted a previous
+// proposal) Devin may emit a create_issues block, which is turned into real
+// GitHub issues like processIssue does.
+func (r *ReviewUsecase) processOversize(ctx context.Context, j *domain.Review, worktree string, prInfo *github.PRInfo, size prSize, createMode bool) (attempts int, err error) {
+	attempts = 1
+	slog.Info("oversize PR: skipping full review for split proposal",
+		"job", j.JobKey, "files", size.Files, "additions", size.Additions,
+		"deletions", size.Deletions, "generated_files", size.GeneratedFiles,
+		"est_minutes", size.EstMinutes, "budget_minutes", r.cfg.PRReviewBudgetMinutes,
+		"truncated", size.Truncated, "create_mode", createMode)
+
+	// PR conversation thread — in create mode the bot's earlier proposal and
+	// the human's acceptance live here.
+	thread := r.fetchIssueThread(ctx, j)
+
+	prompt, err := r.renderSplitPrompt(j, prInfo, size, createMode, thread)
+	if err != nil {
+		r.updatePending(ctx, j, "Review failed: could not render prompt.")
+		r.markFailed(ctx, *j, "render split prompt")
+		return attempts, fmt.Errorf("render split prompt: %w", err)
+	}
+
+	out, attempts, err := r.runDevin(ctx, j, worktree, prompt, validateSplitOutput)
+	if err != nil {
+		if ctx.Err() == context.Canceled {
+			r.updatePending(context.Background(), j, "Review cancelled: a newer push replaced this one.")
+			r.markStatus(ctx, *j, "cancelled")
+			return attempts, queue.ErrJobCancelled
+		}
+		r.updatePending(ctx, j, "Split analysis failed: Devin run failed.")
+		r.markFailed(ctx, *j, "run devin split")
+		return attempts, fmt.Errorf("run devin split: %w", err)
+	}
+
+	response := strings.TrimSpace(out)
+	actions, response := parseIssueActions(response)
+	if response == "" {
+		response = "No output from analysis."
+	}
+
+	if len(actions.CreateIssues) > 0 {
+		created := r.createIssues(ctx, j, actions.CreateIssues)
+		if len(created) > 0 {
+			var sb strings.Builder
+			sb.WriteString(response)
+			sb.WriteString("\n\n**Created issues:**\n")
+			for _, ci := range created {
+				sb.WriteString(fmt.Sprintf("- %s — %s\n", ci.URL, ci.Title))
+			}
+			response = sb.String()
+		}
+	}
+
+	// The proposal is a final answer, not a transient status — post it
+	// without the in-progress marker so later analysis can see it in the
+	// conversation thread.
+	if j.PendingCommentID != 0 {
+		editCtx, cancel := context.WithTimeout(context.Background(), r.cfg.CommentTimeout)
+		_ = r.gh.EditComment(editCtx, j.InstallationID, j.Owner, j.Repo, j.PendingCommentID, response)
+		cancel()
+	} else {
+		postCtx, cancel := context.WithTimeout(context.Background(), r.cfg.CommentTimeout)
+		_, _ = r.gh.PostPendingComment(postCtx, j.InstallationID, j.Owner, j.Repo, j.PRNumber, response)
+		cancel()
+	}
+
+	r.markStatus(ctx, *j, "split_suggested")
+	return attempts, nil
+}
+
+func (r *ReviewUsecase) renderSplitPrompt(j *domain.Review, prInfo *github.PRInfo, size prSize, createMode bool, thread []github.IssueComment) (string, error) {
+	tmpl, err := template.ParseFiles(filepath.Join(r.cfg.PromptsDir, "split.md"))
+	if err != nil {
+		return "", err
+	}
+
+	data := map[string]any{
+		"Owner":          j.Owner,
+		"Repo":           j.Repo,
+		"RepoKey":        fmt.Sprintf("%s/%s", j.Owner, j.Repo),
+		"PRNumber":       j.PRNumber,
+		"Title":          j.Title,
+		"Body":           j.Body,
+		"Author":         j.Author,
+		"HeadSHA":        j.HeadSHA,
+		"BaseSHA":        j.BaseSHA,
+		"BotHandle":      r.cfg.BotHandle,
+		"TriggerComment": j.TriggerComment,
+		"Size":           size,
+		"BudgetMinutes":  r.cfg.PRReviewBudgetMinutes,
+		"CreateMode":     createMode,
+		"PatchText":      prInfo.PatchText,
+		"PatchTooBig":    prInfo.PatchTooBig,
+		"Files":          prInfo.Files,
+		"Thread":         thread,
+	}
+
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, data); err != nil {
+		return "", err
+	}
+	return buf.String(), nil
 }
 
 func (r *ReviewUsecase) markStatus(ctx context.Context, j domain.Review, status string) {
@@ -891,6 +1017,15 @@ func validateReviewOutput(out string) error {
 	}
 	if len(review.Comments) == 0 && len(review.PassesCompleted) == 0 && len(review.FilesReviewed) == 0 {
 		return errors.New("review approved without audit fields (passes_completed/files_reviewed empty)")
+	}
+	return nil
+}
+
+// validateSplitOutput rejects Devin runs that produced no usable text — an
+// empty proposal comment on a PR is a transient failure, not an answer.
+func validateSplitOutput(out string) error {
+	if strings.TrimSpace(out) == "" {
+		return errors.New("empty split output")
 	}
 	return nil
 }

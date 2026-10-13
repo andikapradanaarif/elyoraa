@@ -33,6 +33,9 @@ type Config struct {
 	RedisURL                string
 	MaxPatchBytes           int
 	MaxChangedFiles         int
+	PRSizeGate              bool
+	PRReviewBudgetMinutes   int
+	PRLinesPerMinute        int
 	LogLevel                string
 	MetricsPath             string
 	ReviewTimeout           time.Duration
@@ -74,6 +77,9 @@ func Load() (*Config, error) {
 		RedisURL:              getEnv("REDIS_URL", ""),
 		MaxPatchBytes:         getInt("MAX_PATCH_BYTES", 100_000),
 		MaxChangedFiles:       getInt("MAX_CHANGED_FILES", 50),
+		PRSizeGate:            getBool("PR_SIZE_GATE", true),
+		PRReviewBudgetMinutes: getInt("PR_REVIEW_BUDGET_MINUTES", 15),
+		PRLinesPerMinute:      getInt("PR_LINES_PER_MINUTE", 100),
 		LogLevel:              getEnv("LOG_LEVEL", "info"),
 		MetricsPath:           getEnv("METRICS_PATH", "/metrics"),
 		ReviewTimeout:         getDuration("REVIEW_TIMEOUT", 10*time.Minute),

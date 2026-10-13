@@ -55,6 +55,7 @@ The image is Debian-based because a host-provided `devin` binary is usually glib
 - `GET /jobs` lists tracked jobs (`?status=failed` filters); `GET /jobs/{key}` shows one; `POST /jobs/retry/{key}` re-enqueues a job without a new webhook. Key format: `owner/repo/pr/headSHA`.
 - Devin invocations retry transient failures: `DEVIN_MAX_RETRIES` (default 3, i.e. 4 attempts), `DEVIN_RETRY_BACKOFFS` (default `30s,2m,5m`), `DEVIN_ATTEMPT_TIMEOUT` (default 0 = `REVIEW_TIMEOUT`), `DEVIN_PREFLIGHT_CHECK` (default true, runs `devin models list` before each attempt).
 - Timeout env vars: `REVIEW_TIMEOUT`, `COMMENT_TIMEOUT`, `HTTP_READ_TIMEOUT`, `HTTP_WRITE_TIMEOUT` (Go duration syntax, e.g. `10m`, `30s`).
+- PR size gate: `PR_SIZE_GATE` (default true), `PR_REVIEW_BUDGET_MINUTES` (default 15), `PR_LINES_PER_MINUTE` (default 100). See Review flow.
 - The Devin auth spike is not yet implemented.
 
 ## Review flow
@@ -75,7 +76,10 @@ The image is Debian-based because a host-provided `devin` binary is usually glib
 - Reviews run in two phases so prior findings can't bias the fresh pass: (1) `prompts/review.md` — clean review, no prior context; (2) `prompts/reconcile.md` — a second Devin run that re-verifies the previous bot review's findings (latest `[bot]` review matching `BOT_HANDLE`, capped at 30) against the current code, merging still-present findings the fresh review missed and reporting `prior_findings_status` (fixed/still_present/unclear). Reconcile failures degrade to "unclear" — they never block posting the review.
 - The Devin model is configurable via `DEVIN_MODEL` (default `swe-2-high`) and passed with `--model`.
 - If the review output has no comments, the bot approves the PR; otherwise it requests changes. Output parsing is strict: a missing/unparseable ` ```json ` block is a transient failure (retried, then job failed) — never silently approved. An approval also requires non-empty `passes_completed`/`files_reviewed` audit fields.
-- Issue analysis uses `prompts/issue.md`; PR review uses `prompts/review.md`.
+- Issue analysis uses `prompts/issue.md`; PR review uses `prompts/review.md`; oversize split proposals use `prompts/split.md`.
+- Before reviewing, `ReviewUsecase.Process` estimates review effort as `(added + deleted lines, excluding generated/vendored paths) / PR_LINES_PER_MINUTE` via `internal/usecase/size.go`. If the estimate exceeds `PR_REVIEW_BUDGET_MINUTES` — or the changed-file list was truncated by `MAX_CHANGED_FILES` — the full review is skipped and `processOversize` runs a single Devin pass (`prompts/split.md`) that proposes a PR split plus an issue breakdown, posted as a PR comment (job status `split_suggested`).
+  - Trigger comments containing review keywords (`anyway`, `full review`, `rereview`, `re-review`, `review again`, `recheck`, `check again`, …) bypass the gate and run the normal review.
+  - Trigger comments containing acceptance keywords (`create issues`, `break it down`, `split it`, `go ahead`, …) run the split pass in create mode, which may emit a `create_issues` JSON block handled exactly like the issue-analysis flow.
 
 ## Architecture
 
