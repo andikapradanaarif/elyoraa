@@ -41,7 +41,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := usecase.WriteDevinConfig(cfg.DevinConfigDir); err != nil {
+	if err := usecase.WriteDevinConfig(cfg.DevinConfigDir, cfg.TokenDir); err != nil {
 		slog.Warn("failed to write devin config", "error", err)
 	}
 
@@ -87,13 +87,24 @@ func main() {
 
 	reviewUC := usecase.NewReviewUsecase(cfg, c, githubClient, d, store, m)
 	q := queue.NewWithBackend(cfg.MaxConcurrentReviews, reviewUC, m, qBackend)
+	// The queue needs the usecase as its processor, so the usecase gets the
+	// queue back via setter: respond-job dispatch + prior-status lookup.
+	reviewUC.SetQueue(q)
 
 	webhookUC := usecase.NewWebhookUsecase(cfg, githubClient, d, q, store)
 	h := handler.New(cfg, webhookUC, m)
 
+	// Jobs recorded as "processing" at boot were killed mid-flight by the
+	// last shutdown — mark them failed (retryable via POST /jobs/retry) and
+	// fix their pending comments.
+	reviewUC.ReconcileStuckJobs(ctx)
+
 	go q.Start(ctx)
 	go runSweeper(ctx, c, cfg.WorktreeTTLHours)
 	go runEvictor(ctx, c, cfg.WorkspaceDiskBudgetGB)
+	if db != nil && cfg.AuditRetentionDays > 0 {
+		go runRetention(ctx, store, cfg.AuditRetentionDays)
+	}
 
 	mux := http.NewServeMux()
 	h.Register(mux)
@@ -126,9 +137,19 @@ func main() {
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	<-sig
 
+
+	// Stop accepting HTTP first, then drain workers: in-flight jobs keep
+	// their (root) context while we wait, so a clean shutdown lets a running
+	// review finish and post. Anything still running after the drain timeout
+	// is cancelled below.
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer shutdownCancel()
 	_ = srv.Shutdown(shutdownCtx)
+	shutdownCancel()
+
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), cfg.ShutdownDrainTimeout)
+	q.Stop(drainCtx)
+	drainCancel()
+
 	cancel()
 }
 
@@ -184,6 +205,27 @@ func runEvictor(ctx context.Context, c *cache.Cache, budgetGB int) {
 		case <-t.C:
 			if err := c.EvictLRU(ctx, budgetGB); err != nil {
 				slog.Warn("evictor failed", "error", err)
+			}
+		}
+	}
+}
+
+// runRetention prunes the webhook audit log daily — the events table stores
+// full payloads, so it grows without bound otherwise.
+func runRetention(ctx context.Context, store repository.WebhookStore, days int) {
+	t := time.NewTicker(24 * time.Hour)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			cutoff := time.Now().Add(-time.Duration(days) * 24 * time.Hour)
+			n, err := store.DeleteOlderThan(ctx, cutoff)
+			if err != nil {
+				slog.Warn("webhook retention cleanup failed", "error", err)
+			} else if n > 0 {
+				slog.Info("webhook retention cleanup", "deleted", n, "older_than_days", days)
 			}
 		}
 	}

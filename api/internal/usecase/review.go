@@ -25,6 +25,30 @@ import (
 	"github.com/andikapradanaarif/elyoraa/internal/service/github"
 )
 
+// inProgressMarker marks a comment as a transient bot status. Final replies
+// must not carry it — thread fetches filter it out, so a marked reply would
+// be invisible to later runs.
+const inProgressMarker = "<!-- elyoraa-in-progress -->"
+
+// pendingBody returns the transient "in progress" comment for a job type.
+func pendingBody(j *domain.Review, budgetMinutes int) string {
+	switch {
+	case j.IsRespond():
+		return "On it — reading the thread…\n\n" + inProgressMarker
+	case j.IsGate():
+		return "Sizing up this PR…\n\n" + inProgressMarker
+	case j.IsSplit():
+		return fmt.Sprintf(
+			"This PR looks too big for a single review (estimated ~%d min vs the %d min budget). Drafting a split proposal…\n\n%s",
+			j.SizeEstMinutes, budgetMinutes, inProgressMarker,
+		)
+	case j.IsIssue():
+		return "Analyzing issue…\n\n" + inProgressMarker
+	default:
+		return "Review in progress…\n\n" + inProgressMarker
+	}
+}
+
 // ReviewUsecase orchestrates a single PR review.
 type ReviewUsecase struct {
 	cfg     *config.Config
@@ -33,11 +57,21 @@ type ReviewUsecase struct {
 	d       *dedup.Dedup
 	store   repository.WebhookStore
 	metrics *metrics.Registry
+	q       *queue.Queue
+	tracker queue.JobTracker
 }
 
 // NewReviewUsecase creates a ReviewUsecase.
 func NewReviewUsecase(cfg *config.Config, c *cache.Cache, g *github.Client, d *dedup.Dedup, s repository.WebhookStore, m *metrics.Registry) *ReviewUsecase {
 	return &ReviewUsecase{cfg: cfg, cache: c, gh: g, d: d, store: s, metrics: m}
+}
+
+// SetQueue injects the job queue after construction — the queue needs the
+// usecase as its processor, so it can't arrive via NewReviewUsecase. Gives
+// respond-job dispatch (q.Submit) and prior-status lookup (q.Tracker).
+func (r *ReviewUsecase) SetQueue(q *queue.Queue) {
+	r.q = q
+	r.tracker = q.Tracker()
 }
 
 // Process implements queue.Processor.
@@ -636,10 +670,44 @@ func (r *ReviewUsecase) updatePending(ctx context.Context, j *domain.Review, bod
 	if j.PendingCommentID == 0 {
 		return
 	}
-	body = body + "\n\n<!-- elyoraa-in-progress -->"
+	body = body + "\n\n" + inProgressMarker
 	ctx2, cancel := context.WithTimeout(context.Background(), r.cfg.CommentTimeout)
 	defer cancel()
 	_ = r.gh.EditComment(ctx2, j.InstallationID, j.Owner, j.Repo, j.PendingCommentID, body)
+}
+
+// ReconcileStuckJobs runs once at startup: tracker records still in
+// "processing" belong to jobs killed mid-flight. Mark them failed — this
+// makes them retryable via POST /jobs/retry — and fix the pending comment
+// so the PR doesn't show "in progress" forever. Jobs still sitting queued
+// in a durable backend re-run on their own. StuckProcessing is
+// backend-aware: on Postgres it only returns orphaned records, so a replica
+// starting up never fails jobs another replica is running.
+func (r *ReviewUsecase) ReconcileStuckJobs(ctx context.Context) {
+	if r.q == nil {
+		return
+	}
+	t := r.q.Tracker()
+	if t == nil {
+		return
+	}
+	for _, rec := range t.StuckProcessing(ctx) {
+		j := rec.Job
+		if j.JobKey == "" {
+			// Skeleton record (e.g. written by Started on a replica before
+			// the Enqueued insert landed) — backfill the identity fields so
+			// Failed upserts the real row, not an empty key.
+			j.JobKey, j.Owner, j.Repo, j.PRNumber = rec.JobKey, rec.Owner, rec.Repo, rec.PRNumber
+		}
+		t.Failed(ctx, j, 0, errors.New("interrupted by restart"))
+		if j.PendingCommentID != 0 {
+			editCtx, cancel := context.WithTimeout(ctx, r.cfg.CommentTimeout)
+			_ = r.gh.EditComment(editCtx, j.InstallationID, j.Owner, j.Repo, j.PendingCommentID,
+				"Interrupted by a restart — re-mention me or retry this job via `POST /jobs/retry/"+j.JobKey+"`.")
+			cancel()
+		}
+		slog.Info("reconciled stuck job", "job", rec.JobKey, "type", rec.Type)
+	}
 }
 
 // priorFindingsCap bounds how many previous-review comments are injected
@@ -715,11 +783,18 @@ func (r *ReviewUsecase) runDevin(ctx context.Context, j *domain.Review, worktree
 
 	args := []string{
 		"-p",
-		"--permission-mode", r.cfg.DevinPermissionMode,
 		"--model", r.cfg.DevinModel,
 		"--config", filepath.Join(r.cfg.DevinConfigDir, "devin-config.json"),
 		"--respect-workspace-trust", "false",
 		"--prompt-file", promptFile,
+	}
+	if r.cfg.DevinSandbox {
+		// Autonomous is the only permission mode under --sandbox; the sandbox
+		// enforces Read(...) deny rules at the OS level so credentials stay
+		// hidden even from shell commands.
+		args = append([]string{"--sandbox"}, args...)
+	} else {
+		args = append(args, "--permission-mode", r.cfg.DevinPermissionMode)
 	}
 
 	maxRetries := r.cfg.DevinMaxRetries
@@ -1146,7 +1221,12 @@ func (r *ReviewUsecase) renderReconcilePrompt(j *domain.Review, prev *github.Pre
 // WriteDevinConfig writes a locked devin-config.json inside dir. It omits the
 // mem0 MCP server unless MEM0_API_KEY is set. Using a directory instead of a
 // single file path makes bind-mounts safe against atomic rename-writes.
-func WriteDevinConfig(dir string) error {
+//
+// The deny list hides credential material from the agent: Read(...) denies
+// hide paths at the OS level when --sandbox is active, and block the read tool
+// otherwise. tokenDir holds GitHub installation tokens; configDir holds this
+// config (and the mem0 API key).
+func WriteDevinConfig(dir, tokenDir string) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
@@ -1170,7 +1250,23 @@ func WriteDevinConfig(dir string) error {
 				"Write(**)",
 				"Exec(curl)",
 				"Exec(wget)",
+				"Exec(gh)",
 				"Fetch(**)",
+				// Credentials and secrets the agent must never see —
+				// hidden at OS level under --sandbox.
+				"Read(/run/secrets/**)",
+				"Read(" + tokenDir + "/**)",
+				"Read(" + dir + "/**)",
+				"Read(~/.config/devin/**)",
+				"Read(~/.local/share/devin/**)",
+				"Read(/app/git-askpass.sh)",
+				"Read(**/.env)",
+				"Read(**/.env.*)",
+				"Read(**/.ssh/**)",
+				"Read(**/id_rsa*)",
+				"Read(**/id_ed25519*)",
+				"Read(**/.gitconfig)",
+				"Read(**/*.pem)",
 			},
 		},
 	}

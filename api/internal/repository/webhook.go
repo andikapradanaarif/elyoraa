@@ -12,6 +12,9 @@ import (
 type WebhookStore interface {
 	Record(ctx context.Context, evt *domain.WebhookEvent) error
 	UpdateStatus(ctx context.Context, deliveryID, status, errMsg string) error
+	// DeleteOlderThan prunes audit rows received before cutoff; returns rows
+	// deleted. No-op stores return 0.
+	DeleteOlderThan(ctx context.Context, cutoff time.Time) (int64, error)
 }
 
 // PostgresWebhookStore is a PostgreSQL-backed WebhookStore.
@@ -23,6 +26,9 @@ type noOpWebhookStore struct{}
 
 func (noOpWebhookStore) Record(_ context.Context, _ *domain.WebhookEvent) error { return nil }
 func (noOpWebhookStore) UpdateStatus(_ context.Context, _, _, _ string) error   { return nil }
+func (noOpWebhookStore) DeleteOlderThan(_ context.Context, _ time.Time) (int64, error) {
+	return 0, nil
+}
 
 // NewWebhookStore returns a PostgreSQL store when a pool is available.
 // When pool is nil, it returns a no-op store so the service can run without a database.
@@ -78,4 +84,16 @@ func (s *PostgresWebhookStore) UpdateStatus(ctx context.Context, deliveryID, sta
 		WHERE delivery_id = $3
 	`, status, errMsg, deliveryID)
 	return err
+}
+
+// DeleteOlderThan removes webhook audit rows received before cutoff.
+func (s *PostgresWebhookStore) DeleteOlderThan(ctx context.Context, cutoff time.Time) (int64, error) {
+	if s.pool == nil {
+		return 0, nil
+	}
+	tag, err := s.pool.Exec(ctx, `DELETE FROM webhook_events WHERE received_at < $1`, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
 }

@@ -30,23 +30,31 @@ const (
 // JobRecord is a persisted record of a review job's lifecycle. The full job
 // payload is stored so a failed job can be retried without a new webhook.
 type JobRecord struct {
-	JobKey     string        `json:"job_key"`
-	DeliveryID string        `json:"delivery_id,omitempty"`
-	Type       string        `json:"type,omitempty"`
-	Owner      string        `json:"owner"`
-	Repo       string        `json:"repo"`
-	PRNumber   int           `json:"pr_number"`
-	Status     string        `json:"status"`
-	Error      string        `json:"error,omitempty"`
-	Attempts   int           `json:"attempts"`
-	Job        domain.Review `json:"-"` // stored for manual retry
-	EnqueuedAt time.Time     `json:"enqueued_at"`
-	StartedAt  *time.Time    `json:"started_at,omitempty"`
-	FinishedAt *time.Time    `json:"finished_at,omitempty"`
+	JobKey     string   `json:"job_key"`
+	DeliveryID string   `json:"delivery_id,omitempty"`
+	Type       string   `json:"type,omitempty"`
+	Owner      string   `json:"owner"`
+	Repo       string   `json:"repo"`
+	PRNumber   int      `json:"pr_number"`
+	Status     string   `json:"status"`
+	Error      string   `json:"error,omitempty"`
+	Attempts   int      `json:"attempts"`
+	Actions    []string `json:"actions,omitempty"` // respond job: action types the agent declared
+	// RefinedLines is the generated-excluded line count measured after GetPR.
+	// Kept separate from Job.SizeLines (the enqueue-time payload estimate) so
+	// a manual retry rescales from the same base the webhook recorded.
+	RefinedLines int           `json:"refined_lines,omitempty"`
+	Job          domain.Review `json:"-"` // stored for manual retry
+	EnqueuedAt   time.Time     `json:"enqueued_at"`
+	StartedAt    *time.Time    `json:"started_at,omitempty"`
+	FinishedAt   *time.Time    `json:"finished_at,omitempty"`
 	// DurationSeconds is execution time (pickup → finish), excluding queue
 	// wait. Populated on completion for rate calibration.
 	DurationSeconds int64 `json:"duration_seconds,omitempty"`
-	UpdatedAt       time.Time `json:"updated_at"`
+	// AttemptSeconds is the duration of the final successful Devin attempt —
+	// retry backoff excluded. Calibration prefers it over DurationSeconds.
+	AttemptSeconds int64     `json:"attempt_seconds,omitempty"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 // jobRecordWire is the on-disk representation including the full job payload.
@@ -68,10 +76,33 @@ type JobTracker interface {
 	Cancelled(ctx context.Context, j domain.Review, attempts int)
 	// Failed records a terminal failure with the error and attempt count.
 	Failed(ctx context.Context, j domain.Review, attempts int, err error)
+	// Annotate writes metadata discovered during processing — declared
+	// actions, refined size — onto an existing record. Process can't write
+	// these itself: it receives a copy of the job, not the queue's instance.
+	Annotate(ctx context.Context, key string, a JobAnnotation)
 	// List returns all recorded jobs, most recently updated first.
 	List(ctx context.Context) []JobRecord
 	// Get returns a single job record by key.
 	Get(ctx context.Context, key string) (JobRecord, bool)
+	// StuckProcessing returns records of jobs believed dead — safe to mark
+	// failed at startup. Single-process backends report every "processing"
+	// record; the Postgres backend only reports records whose queue row is
+	// gone, since a live row belongs to some replica.
+	StuckProcessing(ctx context.Context) []JobRecord
+}
+
+// JobAnnotation carries job metadata discovered during processing — declared
+// actions, refined size, phase transitions, attempt timing — written to the
+// record by the worker.
+type JobAnnotation struct {
+	Actions      []string
+	RefinedLines int
+	// Type updates the record's job type — a gate that triaged to "review"
+	// must read as a review for audit and rate calibration.
+	Type string
+	// AttemptSeconds records the final successful Devin attempt duration so
+	// calibration measures work time, not retry/backoff wall time.
+	AttemptSeconds int64
 }
 
 // NewJobTracker returns a persistent tracker when the backend is BoltDB-backed,
@@ -180,6 +211,29 @@ func (m *MemoryJobTracker) Failed(_ context.Context, j domain.Review, attempts i
 	})
 }
 
+func (m *MemoryJobTracker) Annotate(_ context.Context, key string, a JobAnnotation) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rec, ok := m.records[key]
+	if !ok {
+		return
+	}
+	if len(a.Actions) > 0 {
+		rec.Actions = a.Actions
+	}
+	if a.RefinedLines > 0 {
+		rec.RefinedLines = a.RefinedLines
+	}
+	if a.Type != "" {
+		rec.Type = a.Type
+		rec.Job.Type = a.Type
+	}
+	if a.AttemptSeconds > 0 {
+		rec.AttemptSeconds = a.AttemptSeconds
+	}
+	rec.UpdatedAt = time.Now()
+}
+
 func (m *MemoryJobTracker) List(_ context.Context) []JobRecord {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -199,6 +253,18 @@ func (m *MemoryJobTracker) Get(_ context.Context, key string) (JobRecord, bool) 
 		return JobRecord{}, false
 	}
 	return *r, true
+}
+
+// StuckProcessing reports every "processing" record — a memory tracker only
+// exists in one process, so anything processing at boot was killed with it.
+func (m *MemoryJobTracker) StuckProcessing(ctx context.Context) []JobRecord {
+	var out []JobRecord
+	for _, r := range m.List(ctx) {
+		if r.Status == JobStatusProcessing {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // BoltJobTracker persists job records in the same BoltDB file as the queue.
@@ -303,6 +369,39 @@ func (t *BoltJobTracker) Failed(_ context.Context, j domain.Review, attempts int
 	})
 }
 
+func (t *BoltJobTracker) Annotate(_ context.Context, key string, a JobAnnotation) {
+	_ = t.db.Update(func(tx *bolt.Tx) error {
+		bkt := tx.Bucket([]byte(outcomesBucket))
+		v := bkt.Get([]byte(key))
+		if v == nil {
+			return nil
+		}
+		var w jobRecordWire
+		if err := json.Unmarshal(v, &w); err != nil {
+			return nil
+		}
+		if len(a.Actions) > 0 {
+			w.Actions = a.Actions
+		}
+		if a.RefinedLines > 0 {
+			w.RefinedLines = a.RefinedLines
+		}
+		if a.Type != "" {
+			w.Type = a.Type
+			w.Job.Type = a.Type
+		}
+		if a.AttemptSeconds > 0 {
+			w.AttemptSeconds = a.AttemptSeconds
+		}
+		w.UpdatedAt = time.Now()
+		data, err := json.Marshal(w)
+		if err != nil {
+			return err
+		}
+		return bkt.Put([]byte(key), data)
+	})
+}
+
 func (t *BoltJobTracker) List(_ context.Context) []JobRecord {
 	var out []JobRecord
 	_ = t.db.View(func(tx *bolt.Tx) error {
@@ -338,6 +437,18 @@ func (t *BoltJobTracker) Get(_ context.Context, key string) (JobRecord, bool) {
 		return nil
 	})
 	return rec, found
+}
+
+// StuckProcessing reports every "processing" record — BoltDB is
+// single-process, so anything processing at boot died with the process.
+func (t *BoltJobTracker) StuckProcessing(ctx context.Context) []JobRecord {
+	var out []JobRecord
+	for _, r := range t.List(ctx) {
+		if r.Status == JobStatusProcessing {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // prune deletes the oldest records once the bucket exceeds the cap.

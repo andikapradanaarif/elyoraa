@@ -3,6 +3,8 @@ package metrics
 import (
 	"fmt"
 	"net/http"
+	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -18,6 +20,10 @@ type Registry struct {
 	droppedJobs   uint64
 	durationSum   float64
 	durationCount uint64
+	// labeled maps metric name → "k=v,k=v" label set → count. Used for
+	// elyoraa_jobs_total{job_type,outcome}, elyoraa_respond_actions_total
+	// {action}, and elyoraa_gate_verdicts_total{verdict}.
+	labeled map[string]map[string]uint64
 }
 
 func New() *Registry {
@@ -57,6 +63,54 @@ func (r *Registry) RecordDuration(d time.Duration) {
 	defer r.mu.Unlock()
 	r.durationSum += d.Seconds()
 	r.durationCount++
+}
+
+// IncJobOutcome records a terminal job outcome by type:
+// elyoraa_jobs_total{job_type="review",outcome="completed"}.
+func (r *Registry) IncJobOutcome(jobType, outcome string) {
+	r.incLabeled("elyoraa_jobs_total", "job_type", jobType, "outcome", outcome)
+}
+
+// IncRespondAction records a respond-agent declared action:
+// elyoraa_respond_actions_total{action="request_review"}.
+func (r *Registry) IncRespondAction(action string) {
+	r.incLabeled("elyoraa_respond_actions_total", "action", action)
+}
+
+// IncGateVerdict records a gate triage verdict:
+// elyoraa_gate_verdicts_total{verdict="review"}.
+func (r *Registry) IncGateVerdict(verdict string) {
+	r.incLabeled("elyoraa_gate_verdicts_total", "verdict", verdict)
+}
+
+// IncReaction records a reaction left on one of the bot's comments:
+// elyoraa_reactions_total{reaction="+1",action="created"}.
+func (r *Registry) IncReaction(reaction, action string) {
+	if reaction == "" {
+		reaction = "unknown"
+	}
+	if action == "" {
+		action = "unknown"
+	}
+	r.incLabeled("elyoraa_reactions_total", "reaction", reaction, "action", action)
+}
+
+func (r *Registry) incLabeled(name string, kv ...string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.labeled == nil {
+		r.labeled = make(map[string]map[string]uint64)
+	}
+	set := r.labeled[name]
+	if set == nil {
+		set = make(map[string]uint64)
+		r.labeled[name] = set
+	}
+	pairs := make([]string, 0, len(kv)/2)
+	for i := 0; i+1 < len(kv); i += 2 {
+		pairs = append(pairs, fmt.Sprintf(`%s=%q`, kv[i], kv[i+1]))
+	}
+	set[strings.Join(pairs, ",")]++
 }
 
 func (r *Registry) Handler(w http.ResponseWriter, _ *http.Request) {
@@ -99,4 +153,24 @@ func (r *Registry) Handler(w http.ResponseWriter, _ *http.Request) {
 	fmt.Fprintln(w, "# HELP elyoraa_review_duration_seconds_count Count of review durations")
 	fmt.Fprintln(w, "# TYPE elyoraa_review_duration_seconds_count counter")
 	fmt.Fprintf(w, "elyoraa_review_duration_seconds_count %d\n", count)
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	names := make([]string, 0, len(r.labeled))
+	for name := range r.labeled {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		set := r.labeled[name]
+		keys := make([]string, 0, len(set))
+		for k := range set {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		fmt.Fprintf(w, "# TYPE %s counter\n", name)
+		for _, k := range keys {
+			fmt.Fprintf(w, "%s{%s} %d\n", name, k, set[k])
+		}
+	}
 }

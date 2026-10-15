@@ -214,12 +214,12 @@ func (c *Client) PostReview(ctx context.Context, installationID int64, owner, re
 			Path: go_github.Ptr(cm.Path),
 			Line: go_github.Ptr(cm.Line),
 			Side: go_github.Ptr("RIGHT"),
-			Body: go_github.Ptr(cm.Body),
+			Body: go_github.Ptr(redactSecrets(cm.Body)),
 		})
 	}
 
 	_, _, err := client.PullRequests.CreateReview(ctx, owner, repo, number, &go_github.PullRequestReviewRequest{
-		Body:     go_github.Ptr(summary),
+		Body:     go_github.Ptr(redactSecrets(summary)),
 		Event:    go_github.Ptr(state),
 		Comments: draftComments,
 		CommitID: go_github.Ptr(headSHA),
@@ -297,8 +297,8 @@ func (c *Client) CreateIssue(ctx context.Context, installationID int64, owner, r
 	client := c.installationClient(ctx, installationID)
 
 	req := &go_github.IssueRequest{
-		Title: go_github.Ptr(title),
-		Body:  go_github.Ptr(body),
+		Title: go_github.Ptr(redactSecrets(title)),
+		Body:  go_github.Ptr(redactSecrets(body)),
 	}
 	if len(labels) > 0 {
 		req.Labels = &labels
@@ -544,7 +544,7 @@ func (c *Client) GetPreviousReview(ctx context.Context, installationID int64, ow
 // PostPendingComment posts a temporary "Review in progress…" issue comment.
 func (c *Client) PostPendingComment(ctx context.Context, installationID int64, owner, repo string, number int, body string) (int64, error) {
 	client := c.installationClient(ctx, installationID)
-	cm, _, err := client.Issues.CreateComment(ctx, owner, repo, number, &go_github.IssueComment{Body: go_github.Ptr(body)})
+	cm, _, err := client.Issues.CreateComment(ctx, owner, repo, number, &go_github.IssueComment{Body: go_github.Ptr(redactSecrets(body))})
 	if err != nil {
 		return 0, fmt.Errorf("create pending comment: %w", err)
 	}
@@ -554,7 +554,7 @@ func (c *Client) PostPendingComment(ctx context.Context, installationID int64, o
 // EditComment updates an existing issue/PR comment.
 func (c *Client) EditComment(ctx context.Context, installationID int64, owner, repo string, commentID int64, body string) error {
 	client := c.installationClient(ctx, installationID)
-	_, _, err := client.Issues.EditComment(ctx, owner, repo, commentID, &go_github.IssueComment{Body: go_github.Ptr(body)})
+	_, _, err := client.Issues.EditComment(ctx, owner, repo, commentID, &go_github.IssueComment{Body: go_github.Ptr(redactSecrets(body))})
 	if err != nil {
 		return fmt.Errorf("edit comment: %w", err)
 	}

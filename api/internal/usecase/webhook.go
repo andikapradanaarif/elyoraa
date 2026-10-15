@@ -25,6 +25,12 @@ var ErrQueueFull = errors.New("queue full")
 // ErrDuplicate is returned when the same review is already in flight.
 var ErrDuplicate = errors.New("duplicate review in flight")
 
+// ErrRateLimited is returned when an author exceeds the mention rate limit.
+var ErrRateLimited = errors.New("mention rate limited")
+
+// ErrCapped is returned when the repo exceeds the daily job cap.
+var ErrCapped = errors.New("daily job cap reached")
+
 // ErrNotForUs is returned when the webhook is not an event the bot handles.
 var ErrNotForUs = errors.New("event not handled")
 

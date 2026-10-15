@@ -125,14 +125,17 @@ func TestQueueWithFileBackend(t *testing.T) {
 	}), nil, b)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	go q.Start(ctx)
+	done := make(chan struct{})
+	go func() { q.Start(ctx); close(done) }()
 
 	q.Submit(ctx, domain.Review{JobKey: "a"})
 	q.Submit(ctx, domain.Review{JobKey: "b"})
 
-	// Give workers time to process.
+	// Give workers time to process, then shut down: cancel + Start's worker
+	// drain makes the processed slice safe to read.
 	time.Sleep(200 * time.Millisecond)
 	cancel()
+	<-done
 
 	if len(processed) != 2 {
 		t.Fatalf("expected 2 processed, got %d: %v", len(processed), processed)

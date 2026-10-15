@@ -1,11 +1,13 @@
 package handler
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/andikapradanaarif/elyoraa/internal/config"
 	"github.com/andikapradanaarif/elyoraa/internal/metrics"
@@ -26,13 +28,37 @@ func New(cfg *config.Config, uc *usecase.WebhookUsecase, m *metrics.Registry) *H
 }
 
 // Register adds the webhook, health, metrics, and job routes to the mux.
+// Job and metrics routes are admin-only: they require
+// "Authorization: Bearer $ADMIN_TOKEN" and return 404 when no token is
+// configured (closed by default — the webhook port is public).
 func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/webhook/gh", h.ServeHTTP)
 	mux.HandleFunc("/health", h.Health)
-	mux.HandleFunc(h.cfg.MetricsPath, h.metrics.Handler)
-	mux.HandleFunc("GET /jobs", h.ListJobs)
-	mux.HandleFunc("GET /jobs/{key...}", h.GetJob)
-	mux.HandleFunc("POST /jobs/retry/{key...}", h.RetryJob)
+	mux.HandleFunc(h.cfg.MetricsPath, h.requireAdmin(h.metrics.Handler))
+	mux.HandleFunc("GET /jobs", h.requireAdmin(h.ListJobs))
+	mux.HandleFunc("GET /jobs/{key...}", h.requireAdmin(h.GetJob))
+	mux.HandleFunc("POST /jobs/retry/{key...}", h.requireAdmin(h.RetryJob))
+}
+
+// requireAdmin gates admin endpoints on a bearer token. An unconfigured token
+// means the endpoint does not exist, rather than existing unauthenticated.
+func (h *Handler) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		token := h.cfg.AdminToken
+		if token == "" {
+			http.NotFound(w, r)
+			return
+		}
+		auth := r.Header.Get("Authorization")
+		const prefix = "Bearer "
+		if !strings.HasPrefix(auth, prefix) ||
+			subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(auth, prefix)), []byte(token)) != 1 {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="elyoraa-admin"`)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next(w, r)
+	}
 }
 
 // ServeHTTP handles incoming GitHub webhooks.
@@ -42,7 +68,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	payload, err := io.ReadAll(r.Body)
+	payload, err := io.ReadAll(http.MaxBytesReader(w, r.Body, h.cfg.WebhookMaxBytes))
 	if err != nil {
 		http.Error(w, "read body", http.StatusBadRequest)
 		return
@@ -63,12 +89,21 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if h.cfg.Paused {
+		// Global kill switch: acknowledge and drop everything while the
+		// server stays healthy for probes.
+		slog.Info("webhook dropped: paused", "event", eventType, "delivery", deliveryID)
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
 	ctx := usecase.WithDeliveryID(r.Context(), deliveryID)
 	ctx = usecase.WithEventType(ctx, eventType)
 
 	review, err := h.uc.Handle(ctx, payload, sig)
 	if err != nil {
-		if !errors.Is(err, usecase.ErrQueueFull) && !errors.Is(err, usecase.ErrDuplicate) {
+		if !errors.Is(err, usecase.ErrQueueFull) && !errors.Is(err, usecase.ErrDuplicate) &&
+			!errors.Is(err, usecase.ErrRateLimited) && !errors.Is(err, usecase.ErrCapped) {
 			slog.Warn("webhook handle", "event", eventType, "delivery", deliveryID, "error", err)
 			http.Error(w, "webhook", http.StatusBadRequest)
 			return

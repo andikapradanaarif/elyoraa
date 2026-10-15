@@ -29,7 +29,11 @@ type BoltDBBackend struct {
 	maxSize  int
 	mu       sync.Mutex
 	notEmpty chan struct{}
-	closed   bool
+	closedCh chan struct{}
+	// stopped rejects new Put/Next calls while keeping db open so the shared
+	// job tracker can still record outcomes during a graceful drain.
+	stopped bool
+	closed  bool
 }
 
 // OpenBoltDB opens (and creates if needed) a BoltDB queue file.
@@ -56,7 +60,7 @@ func OpenBoltDB(path string, maxSize int) (*BoltDBBackend, error) {
 		return nil, err
 	}
 
-	b := &BoltDBBackend{db: db, maxSize: maxSize, notEmpty: make(chan struct{}, 1)}
+	b := &BoltDBBackend{db: db, maxSize: maxSize, notEmpty: make(chan struct{}, 1), closedCh: make(chan struct{})}
 
 	// Recover head/tail counters from existing data.
 	if err := db.Update(func(tx *bolt.Tx) error {
@@ -95,7 +99,7 @@ func (b *BoltDBBackend) Put(ctx context.Context, j domain.Review) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	if b.closed {
+	if b.closed || b.stopped {
 		return false
 	}
 
@@ -146,7 +150,7 @@ func (b *BoltDBBackend) Next(ctx context.Context) (domain.Review, bool) {
 		}
 
 		b.mu.Lock()
-		if b.closed {
+		if b.closed || b.stopped {
 			b.mu.Unlock()
 			return domain.Review{}, false
 		}
@@ -183,9 +187,11 @@ func (b *BoltDBBackend) Next(ctx context.Context) (domain.Review, bool) {
 			return j, true
 		}
 
-		// Wait for a new job or context cancellation.
+		// Wait for a new job, close, or context cancellation.
 		select {
 		case <-ctx.Done():
+			return domain.Review{}, false
+		case <-b.closedCh:
 			return domain.Review{}, false
 		case <-b.notEmpty:
 		}
@@ -215,14 +221,27 @@ func (b *BoltDBBackend) lenTx(tx *bolt.Tx) int {
 	return tx.Bucket([]byte(jobsBucket)).Stats().KeyN
 }
 
+// SignalStop rejects new work and wakes Next waiters, but keeps db open —
+// the BoltJobTracker shares the handle, and in-flight jobs finishing during
+// the drain window still record outcomes. Close does the final release.
+func (b *BoltDBBackend) SignalStop() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.stopped {
+		return
+	}
+	b.stopped = true
+	close(b.closedCh)
+}
+
 func (b *BoltDBBackend) Close() error {
+	b.SignalStop()
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.closed {
 		return nil
 	}
 	b.closed = true
-	close(b.notEmpty)
 	return b.db.Close()
 }
 

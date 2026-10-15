@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
+	"sync/atomic"
 
 	"github.com/andikapradanaarif/elyoraa/internal/domain"
 	"github.com/andikapradanaarif/elyoraa/internal/metrics"
@@ -34,6 +36,8 @@ type Queue struct {
 	processor Processor
 	metrics   *metrics.Registry
 	tracker   JobTracker
+	stopping  atomic.Bool
+	wg        sync.WaitGroup
 }
 
 // New creates a queue with an in-memory backend.
@@ -57,8 +61,15 @@ func (q *Queue) Tracker() JobTracker {
 	return q.tracker
 }
 
-// Submit enqueues a job. Returns false if the queue is full and the job is dropped.
+// Submit enqueues a job. Returns false if the queue is full, draining, and
+// the job is dropped.
 func (q *Queue) Submit(ctx context.Context, j domain.Review) bool {
+	if q.stopping.Load() {
+		if q.metrics != nil {
+			q.metrics.IncDroppedJobs()
+		}
+		return false
+	}
 	if !q.backend.Put(ctx, j) {
 		if q.metrics != nil {
 			q.metrics.IncDroppedJobs()
@@ -82,16 +93,50 @@ func (q *Queue) Submit(ctx context.Context, j domain.Review) bool {
 	return true
 }
 
-// Start launches the worker pool. It blocks until the context is cancelled.
+// Start launches the worker pool. It blocks until the context is cancelled,
+// waits for workers to unwind, then releases the backend.
 func (q *Queue) Start(ctx context.Context) {
 	for i := 0; i < q.workers; i++ {
+		q.wg.Add(1)
 		go q.worker(ctx, i)
 	}
 	<-ctx.Done()
+	// Workers share ctx with us — they unwind on cancellation. Wait so their
+	// final tracker writes land before shared resources (Bolt) close.
+	q.wg.Wait()
+	_ = q.backend.Close()
+}
+
+// Stop gracefully drains the pool: new submissions are rejected and the
+// backend stops handing out jobs (queued jobs persist on the Bolt backend
+// for the next boot), then it waits for in-flight jobs — and so workers —
+// to finish until ctx expires, keeping shared handles (e.g. the Bolt tracker)
+// alive so outcomes still record. The backend is fully closed last. The
+// caller should still cancel the Start context afterwards to kill anything
+// that outlived the drain.
+func (q *Queue) Stop(ctx context.Context) {
+	q.stopping.Store(true)
+	if s, ok := q.backend.(StoppableBackend); ok {
+		s.SignalStop()
+	} else {
+		_ = q.backend.Close()
+	}
+	done := make(chan struct{})
+	go func() {
+		q.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-ctx.Done():
+		slog.Warn("queue drain timed out; in-flight jobs will be cancelled")
+	case <-done:
+		slog.Info("queue drained")
+	}
 	_ = q.backend.Close()
 }
 
 func (q *Queue) worker(ctx context.Context, id int) {
+	defer q.wg.Done()
 	for {
 		j, ok := q.backend.Next(ctx)
 		if !ok {
@@ -115,6 +160,11 @@ func (q *Queue) worker(ctx context.Context, id int) {
 			"type", j.Type,
 		)
 
+		jobType := j.Type
+		if jobType == "" {
+			jobType = "review"
+		}
+
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
@@ -124,6 +174,7 @@ func (q *Queue) worker(ctx context.Context, id int) {
 					log.Error("worker panic recovered", "panic", fmt.Sprintf("%v", r))
 					if q.metrics != nil {
 						q.metrics.IncReviewErrors()
+						q.metrics.IncJobOutcome(jobType, "failed")
 					}
 				}
 				if q.metrics != nil {
@@ -138,15 +189,24 @@ func (q *Queue) worker(ctx context.Context, id int) {
 				if q.tracker != nil {
 					q.tracker.Completed(ctx, j, attempts)
 				}
+				if q.metrics != nil {
+					q.metrics.IncJobOutcome(jobType, "completed")
+				}
 				log.Info("job completed", "attempts", attempts)
 			case errors.Is(err, ErrJobCancelled):
 				if q.tracker != nil {
 					q.tracker.Cancelled(ctx, j, attempts)
 				}
+				if q.metrics != nil {
+					q.metrics.IncJobOutcome(jobType, "cancelled")
+				}
 				log.Info("job cancelled", "attempts", attempts)
 			default:
 				if q.tracker != nil {
 					q.tracker.Failed(ctx, j, attempts, err)
+				}
+				if q.metrics != nil {
+					q.metrics.IncJobOutcome(jobType, "failed")
 				}
 				log.Error("job failed", "attempts", attempts, "error", err)
 				if q.metrics != nil {
