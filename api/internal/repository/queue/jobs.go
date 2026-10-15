@@ -113,6 +113,9 @@ func NewJobTracker(b Backend) JobTracker {
 			return t
 		}
 	}
+	if pb, ok := b.(*PostgresBackend); ok {
+		return NewPostgresJobTracker(pb.pool, pb.instance)
+	}
 	return NewMemoryJobTracker(maxJobRecords)
 }
 

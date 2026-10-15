@@ -23,6 +23,7 @@ import (
 	"github.com/andikapradanaarif/elyoraa/internal/startup"
 	"github.com/andikapradanaarif/elyoraa/internal/usecase"
 	"github.com/andikapradanaarif/elyoraa/migration"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func main() {
@@ -75,11 +76,22 @@ func main() {
 	}
 
 	c := cache.New(cfg.WorkspaceBase, "/app/git-askpass.sh", tokenDir, cfg.GitBaseURL)
-	d := dedup.New()
 	m := metrics.New()
 	store := repository.NewWebhookStore(db)
 
-	qBackend, err := newQueueBackend(cfg)
+	// instance identifies this replica — Postgres queue claims, dedup
+	// claims, and job records all carry it.
+	hostname, _ := os.Hostname()
+	instance := fmt.Sprintf("%s-%d-%d", hostname, os.Getpid(), time.Now().UnixNano())
+
+	var d dedup.Interface
+	if cfg.QueueBackend == "postgres" {
+		d = dedup.NewPostgres(ctx, db, instance)
+	} else {
+		d = dedup.New()
+	}
+
+	qBackend, err := newQueueBackend(cfg, db, instance)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "queue backend: %v\n", err)
 		os.Exit(1)
@@ -152,8 +164,19 @@ func main() {
 	cancel()
 }
 
-func newQueueBackend(cfg *config.Config) (queue.Backend, error) {
+func newQueueBackend(cfg *config.Config, db *pgxpool.Pool, instance string) (queue.Backend, error) {
 	switch cfg.QueueBackend {
+	case "postgres":
+		if db == nil {
+			return nil, fmt.Errorf("QUEUE_BACKEND=postgres requires DATABASE_URL")
+		}
+		lease := cfg.QueueJobLease
+		if lease <= 0 {
+			// A job can't legitimately outlive its timeout; the lease covers
+			// that plus slack for cleanup so only a dead worker's row lapses.
+			lease = cfg.ReviewTimeout + 5*time.Minute
+		}
+		return queue.NewPostgresBackend(db, instance, lease), nil
 	case "file", "boltdb":
 		return queue.OpenBoltDB(cfg.QueueFilePath, 0)
 	case "memory", "":

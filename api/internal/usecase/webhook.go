@@ -59,7 +59,7 @@ func WithDeliveryID(ctx context.Context, deliveryID string) context.Context {
 type WebhookUsecase struct {
 	cfg     *config.Config
 	gh      *github.Client
-	d       *dedup.Dedup
+	d       dedup.Interface
 	q       *queue.Queue
 	store   repository.WebhookStore
 	limiter *rateLimiter
@@ -68,7 +68,7 @@ type WebhookUsecase struct {
 }
 
 // NewWebhookUsecase creates a WebhookUsecase.
-func NewWebhookUsecase(cfg *config.Config, client *github.Client, d *dedup.Dedup, q *queue.Queue, store repository.WebhookStore, c *cache.Cache, m *metrics.Registry) *WebhookUsecase {
+func NewWebhookUsecase(cfg *config.Config, client *github.Client, d dedup.Interface, q *queue.Queue, store repository.WebhookStore, c *cache.Cache, m *metrics.Registry) *WebhookUsecase {
 	return &WebhookUsecase{
 		cfg:     cfg,
 		gh:      client,

@@ -9,6 +9,23 @@ import (
 	"github.com/andikapradanaarif/elyoraa/internal/domain"
 )
 
+// Interface is the dedup contract. Dedup is the single-process
+// implementation; PostgresDedup the multi-replica one (QUEUE_BACKEND=
+// postgres).
+type Interface interface {
+	// TryStart registers the job and returns its context; false skips it.
+	TryStart(parent context.Context, j domain.Review) (context.Context, *domain.Review, bool)
+	// BindCancel attaches a cancel func to a claimed job; false means the
+	// job lost its slot while queued and must be skipped.
+	BindCancel(j domain.Review, cancel context.CancelFunc) bool
+	// Done releases the job's claim.
+	Done(j domain.Review)
+	// Active returns the in-flight count.
+	Active() int
+	// UpdateJob mutates the stored copy of an in-flight job.
+	UpdateJob(key string, mutate func(*domain.Review))
+}
+
 // Dedup tracks in-flight review jobs and handles cancel-and-replace.
 type Dedup struct {
 	mu       sync.Mutex

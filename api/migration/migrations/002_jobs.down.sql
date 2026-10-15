@@ -1,0 +1,3 @@
+DROP TABLE IF EXISTS job_claims;
+DROP TABLE IF EXISTS job_records;
+DROP TABLE IF EXISTS job_queue;

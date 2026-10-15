@@ -54,7 +54,7 @@ type ReviewUsecase struct {
 	cfg     *config.Config
 	cache   *cache.Cache
 	gh      *github.Client
-	d       *dedup.Dedup
+	d       dedup.Interface
 	store   repository.WebhookStore
 	metrics *metrics.Registry
 	q       *queue.Queue
@@ -62,7 +62,7 @@ type ReviewUsecase struct {
 }
 
 // NewReviewUsecase creates a ReviewUsecase.
-func NewReviewUsecase(cfg *config.Config, c *cache.Cache, g *github.Client, d *dedup.Dedup, s repository.WebhookStore, m *metrics.Registry) *ReviewUsecase {
+func NewReviewUsecase(cfg *config.Config, c *cache.Cache, g *github.Client, d dedup.Interface, s repository.WebhookStore, m *metrics.Registry) *ReviewUsecase {
 	return &ReviewUsecase{cfg: cfg, cache: c, gh: g, d: d, store: s, metrics: m}
 }
 
