@@ -42,7 +42,7 @@ The worktree is checked out at the head commit. Inspect the change with `git dif
 Below is the PR conversation, oldest first. Comments marked _(bot)_ were posted by bot accounts — ones from your own bot account are your previous responses.
 
 {{range .Thread}}
-**@{{.Author}}**{{if .IsBot}} _(bot)_{{end}} — {{.CreatedAt.Format "2006-01-02 15:04 UTC"}}:
+**@{{.Author}}**{{if .IsBot}} _(bot)_{{end}}{{if ne .Kind "comment"}} [{{.Kind}}{{if .Path}} `{{.Path}}:{{.Line}}`{{end}}]{{end}} — {{.CreatedAt.Format "2006-01-02 15:04 UTC"}}:
 
 {{.Body}}
 {{end}}
@@ -96,6 +96,7 @@ The thread above shows your earlier split proposal and an explicit acceptance (e
 
 Rules for this block:
 - Emit it only because a human explicitly accepted — maximum 10 issues.
+- If no earlier split proposal from you is visible in the thread above, do **not** emit the block — present the breakdown and ask for acceptance instead.
 - Every body must stand alone — no "see above" references. Include which files/areas the issue covers.
 - Use labels matching the repository's conventions (e.g. `enhancement`, `bug`, `refactor`, `chore`, `documentation`, `testing`, `performance`, `security`). Unknown labels are dropped; the bot's own tag is added automatically, so do not include it.
 - The JSON block is metadata — it is stripped from the posted comment, the issues are created, and links are appended under your reply automatically.
@@ -108,5 +109,5 @@ Write your response as Markdown — it is posted verbatim as a PR comment. Open 
 
 End the comment with exactly this guidance so the author knows the next steps:
 
-> Reply `@{{.BotHandle}} create the issues` and I will file this breakdown as GitHub issues, or `@{{.BotHandle}} review anyway` to force a full review of this PR as-is.
+> Reply `@{{.BotHandle}} create the issues` (or `/accept`) and I will file this breakdown as GitHub issues, or `@{{.BotHandle}} review anyway` (`/review`) to force a full review of this PR as-is.
 {{end}}

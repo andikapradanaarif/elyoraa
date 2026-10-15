@@ -36,6 +36,8 @@ type PRInfo struct {
 	BaseSHA     string
 	HeadSHA     string
 	IsDraft     bool
+	Merged      bool
+	Closed      bool
 	Files       []*FileInfo
 	PatchText   string
 	PatchTooBig bool
@@ -143,6 +145,8 @@ func (c *Client) GetPR(ctx context.Context, installationID int64, owner, repo st
 		BaseSHA: pr.GetBase().GetSHA(),
 		HeadSHA: pr.GetHead().GetSHA(),
 		IsDraft: pr.GetDraft(),
+		Merged:  pr.GetMerged(),
+		Closed:  pr.GetState() == "closed",
 	}
 
 	var files []*go_github.CommitFile
@@ -244,6 +248,98 @@ type IssueComment struct {
 	Body      string
 	CreatedAt time.Time
 	IsBot     bool
+}
+
+// ReviewSummary is a submitted PR review (approval, changes-requested, or
+// plain comment) — the review-level body, not its inline comments.
+type ReviewSummary struct {
+	ID          int64
+	Author      string
+	IsBot       bool
+	State       string // APPROVED, CHANGES_REQUESTED, COMMENTED, …
+	Body        string
+	SubmittedAt time.Time
+}
+
+// ListReviewSummaries returns submitted PR reviews, oldest first, capped.
+func (c *Client) ListReviewSummaries(ctx context.Context, installationID int64, owner, repo string, number int) ([]ReviewSummary, error) {
+	client := c.installationClient(ctx, installationID)
+
+	var out []ReviewSummary
+	page := 1
+	for {
+		reviews, resp, err := client.PullRequests.ListReviews(ctx, owner, repo, number, &go_github.ListOptions{Page: page, PerPage: 100})
+		if err != nil {
+			return nil, fmt.Errorf("list reviews: %w", err)
+		}
+		for _, rv := range reviews {
+			author := rv.GetUser().GetLogin()
+			out = append(out, ReviewSummary{
+				ID:          rv.GetID(),
+				Author:      author,
+				IsBot:       strings.HasSuffix(strings.ToLower(author), "[bot]"),
+				State:       rv.GetState(),
+				Body:        rv.GetBody(),
+				SubmittedAt: rv.GetSubmittedAt().Time,
+			})
+		}
+		if resp.NextPage == 0 || len(out) >= 200 {
+			return out, nil
+		}
+		page = resp.NextPage
+	}
+}
+
+// PullReviewComment is an inline comment left on a PR diff.
+type PullReviewComment struct {
+	ID        int64
+	Author    string
+	IsBot     bool
+	Path      string
+	Line      int
+	Body      string
+	InReplyTo int64 // parent comment ID when this is a reply in a thread
+	CreatedAt time.Time
+}
+
+// ListPullReviewComments returns inline PR review comments, oldest first,
+// capped.
+func (c *Client) ListPullReviewComments(ctx context.Context, installationID int64, owner, repo string, number int) ([]PullReviewComment, error) {
+	client := c.installationClient(ctx, installationID)
+
+	var out []PullReviewComment
+	page := 1
+	for {
+		comments, resp, err := client.PullRequests.ListComments(ctx, owner, repo, number, &go_github.PullRequestListCommentsOptions{
+			ListOptions: go_github.ListOptions{Page: page, PerPage: 100},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("list review comments: %w", err)
+		}
+		for _, cm := range comments {
+			author := cm.GetUser().GetLogin()
+			// Outdated comments report Line==0 — OriginalLine keeps their
+			// anchor instead of rendering `path:0`.
+			line := cm.GetLine()
+			if line == 0 {
+				line = cm.GetOriginalLine()
+			}
+			out = append(out, PullReviewComment{
+				ID:        cm.GetID(),
+				Author:    author,
+				IsBot:     strings.HasSuffix(strings.ToLower(author), "[bot]"),
+				Path:      cm.GetPath(),
+				Line:      line,
+				Body:      cm.GetBody(),
+				InReplyTo: cm.GetInReplyTo(),
+				CreatedAt: cm.GetCreatedAt().Time,
+			})
+		}
+		if resp.NextPage == 0 || len(out) >= 300 {
+			return out, nil
+		}
+		page = resp.NextPage
+	}
 }
 
 // ListIssueComments returns the comment thread for an issue, oldest first.
@@ -530,9 +626,13 @@ func (c *Client) GetPreviousReview(ctx context.Context, installationID int64, ow
 		if cm.GetInReplyTo() != 0 || cm.GetPullRequestReviewID() != reviewID || !isOurBot(cm.GetUser().GetLogin()) {
 			continue
 		}
+		line := cm.GetLine()
+		if line == 0 {
+			line = cm.GetOriginalLine()
+		}
 		out.Findings = append(out.Findings, PriorFinding{
 			Path:     cm.GetPath(),
-			Line:     cm.GetLine(),
+			Line:     line,
 			Body:     cm.GetBody(),
 			Outdated: cm.Position == nil,
 			Replies:  replies[cm.GetID()],

@@ -380,9 +380,9 @@ func TestRenderSplitPrompt(t *testing.T) {
 	}
 
 	// Create mode: thread + create_issues instructions present.
-	thread := []github.IssueComment{
-		{Author: "elyoraa[bot]", Body: "proposed split into 3 PRs", IsBot: true},
-		{Author: "alice", Body: "@elyoraa create the issues"},
+	thread := []ConversationEntry{
+		{Author: "elyoraa[bot]", Body: "proposed split into 3 PRs", IsBot: true, Kind: "comment"},
+		{Author: "alice", Body: "@elyoraa create the issues", Kind: "comment"},
 	}
 	out, err = r.renderSplitPrompt(j, prInfo, size, true, thread)
 	if err != nil {

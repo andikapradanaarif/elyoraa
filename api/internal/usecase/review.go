@@ -110,11 +110,14 @@ func (r *ReviewUsecase) Process(ctx context.Context, j domain.Review) (attempts 
 		return attempts, queue.ErrJobCancelled
 	}
 
-	ctx, cancel := context.WithTimeout(jobCtx, r.cfg.ReviewTimeout)
+	ctx, cancel := context.WithTimeout(jobCtx, r.jobTimeout(&j))
 	defer cancel()
 
 	if j.IsIssue() {
 		return r.processIssue(ctx, &j)
+	}
+	if j.IsRespond() {
+		return r.processRespond(ctx, &j)
 	}
 
 	token, err := r.gh.InstallationToken(ctx, j.InstallationID)
@@ -186,18 +189,45 @@ func (r *ReviewUsecase) Process(ctx context.Context, j domain.Review) (attempts 
 		}
 	}
 
+	// Gate jobs run their triage pass now: the agent judges review-vs-split
+	// and the job transitions inline. A cancelled triage is a cancellation,
+	// not a fallback — don't convert it into a split.
+	if j.IsGate() {
+		verdict, err := r.triageGate(ctx, &j, worktree, prInfo, gen)
+		if err != nil {
+			r.updatePending(context.Background(), &j, "Sizing cancelled: superseded.")
+			r.markStatus(ctx, j, "cancelled")
+			return attempts, queue.ErrJobCancelled
+		}
+		if verdict == "split" {
+			j.Type = "split"
+			r.d.UpdateJob(j.JobKey, func(sj *domain.Review) { sj.Type = "split" })
+			r.annotatePhase(ctx, j.JobKey, "split")
+			return r.processOversize(ctx, &j, worktree, prInfo, refinedEstimate(prInfo, &j, r.cfg.PRLinesPerMinute, gen))
+		}
+		j.Type = "review"
+		r.d.UpdateJob(j.JobKey, func(sj *domain.Review) { sj.Type = "review" })
+		r.annotatePhase(ctx, j.JobKey, "review")
+		r.updatePending(ctx, &j, "Review in progress…")
+	}
+
 	// Split jobs were gated at enqueue from webhook counters, which include
 	// generated files. Re-verify with per-file stats: if the refined estimate
 	// fits the budget, run the normal review after all. The inverse never
 	// happens — per-file estimation only removes lines, so a job enqueued as
-	// a review can't secretly be oversize.
+	// a review can't secretly be oversize. Explicit intent is never demoted:
+	// dispatched/accepted jobs reach processOversize regardless of the
+	// refined number (SplitCreate kept for records predating Origin).
 	if j.IsSplit() {
 		size := refinedEstimate(prInfo, &j, r.cfg.PRLinesPerMinute, gen)
-		if size.tooBig(jobBudget(r.cfg, j)) {
+		if size.tooBig(jobBudget(r.cfg, j)) || j.SplitCreate || j.HasExplicitIntent() {
 			return r.processOversize(ctx, &j, worktree, prInfo, size)
 		}
 		slog.Info("split job demoted to review: refined estimate under budget",
 			"job", j.JobKey, "files", size.Files, "est_minutes", size.EstMinutes)
+		j.Type = "review"
+		r.d.UpdateJob(j.JobKey, func(sj *domain.Review) { sj.Type = "review" })
+		r.annotatePhase(ctx, j.JobKey, "review")
 		r.updatePending(ctx, &j, "Review in progress…")
 	}
 
@@ -212,7 +242,7 @@ func (r *ReviewUsecase) Process(ctx context.Context, j domain.Review) (attempts 
 		return attempts, fmt.Errorf("render prompt: %w", err)
 	}
 
-	out, attempts, err := r.runDevin(ctx, &j, worktree, prompt, validateReviewOutput)
+	out, attempts, lastDur, err := r.runDevin(ctx, &j, worktree, prompt, validateReviewOutput)
 	if err != nil {
 		if ctx.Err() == context.Canceled {
 			r.updatePending(context.Background(), &j, "Review cancelled: a newer push replaced this one.")
@@ -222,6 +252,9 @@ func (r *ReviewUsecase) Process(ctx context.Context, j domain.Review) (attempts 
 		r.updatePending(ctx, &j, "Review failed: Devin review run failed.")
 		r.markFailed(ctx, j, "run devin")
 		return attempts, fmt.Errorf("run devin: %w", err)
+	}
+	if r.tracker != nil && lastDur > 0 {
+		r.tracker.Annotate(ctx, j.JobKey, queue.JobAnnotation{AttemptSeconds: int64(lastDur.Seconds())})
 	}
 
 	review, err := parseReviewOutput(out)
@@ -401,9 +434,9 @@ func (r *ReviewUsecase) processIssue(ctx context.Context, j *domain.Review) (att
 
 	j.RepoAvailable = repoAvailable
 
-	// Fetch the comment thread so the analysis can follow prior discussion:
+	// Fetch the discussion so the analysis can follow prior discussion:
 	// previous bot replies, human acceptance of a proposal, open questions.
-	thread := r.fetchIssueThread(ctx, j)
+	thread := r.fetchConversation(ctx, j)
 
 	prompt, err := r.renderIssuePrompt(j, thread)
 	if err != nil {
@@ -412,7 +445,7 @@ func (r *ReviewUsecase) processIssue(ctx context.Context, j *domain.Review) (att
 		return attempts, fmt.Errorf("render issue prompt: %w", err)
 	}
 
-	out, attempts, err := r.runDevin(ctx, j, workdir, prompt, nil)
+	out, attempts, _, err := r.runDevin(ctx, j, workdir, prompt, nil)
 	if err != nil {
 		if ctx.Err() == context.Canceled {
 			r.updatePending(context.Background(), j, "Issue analysis cancelled.")
@@ -434,9 +467,11 @@ func (r *ReviewUsecase) processIssue(ctx context.Context, j *domain.Review) (att
 		response = "No output from analysis."
 	}
 
-	if len(actions.CreateIssues) > 0 {
-		created := r.createIssues(ctx, j, actions.CreateIssues)
-		if len(created) > 0 {
+	// A superseded run must not create issues — a newer job owns the slot.
+	if ctx.Err() == nil && len(actions.CreateIssues) > 0 {
+		if !mayCreateIssues(j.TriggerAssociation) {
+			response += "\n\n_Issue creation skipped — only repository collaborators can create issues._"
+		} else if created := r.createIssues(ctx, j, actions.CreateIssues); len(created) > 0 {
 			var sb strings.Builder
 			sb.WriteString(response)
 			sb.WriteString("\n\n**Created issues:**\n")
@@ -447,9 +482,11 @@ func (r *ReviewUsecase) processIssue(ctx context.Context, j *domain.Review) (att
 		}
 	}
 
+	// The analysis is a final answer, not a transient status — post it
+	// without the in-progress marker so later runs see it in the thread.
 	if j.PendingCommentID != 0 {
 		editCtx, cancel := context.WithTimeout(context.Background(), r.cfg.CommentTimeout)
-		_ = r.gh.EditComment(editCtx, j.InstallationID, j.Owner, j.Repo, j.PendingCommentID, response+"\n\n<!-- elyoraa-in-progress -->")
+		_ = r.gh.EditComment(editCtx, j.InstallationID, j.Owner, j.Repo, j.PendingCommentID, response)
 		cancel()
 	} else {
 		postCtx, cancel := context.WithTimeout(context.Background(), r.cfg.CommentTimeout)
@@ -461,34 +498,7 @@ func (r *ReviewUsecase) processIssue(ctx context.Context, j *domain.Review) (att
 	return attempts, nil
 }
 
-// issueThreadMaxComments and issueThreadMaxBytes bound how much of an issue's
-// comment thread is injected into the analysis prompt.
-const (
-	issueThreadMaxComments = 50
-	issueThreadMaxBytes    = 48 * 1024
-)
-
-// fetchIssueThread returns the issue's comment thread, minus the transient
-// "Analyzing issue…" placeholder comment. Failures are non-fatal.
-func (r *ReviewUsecase) fetchIssueThread(ctx context.Context, j *domain.Review) []github.IssueComment {
-	cctx, cancel := context.WithTimeout(ctx, r.cfg.CommentTimeout)
-	defer cancel()
-	comments, err := r.gh.ListIssueComments(cctx, j.InstallationID, j.Owner, j.Repo, j.PRNumber, issueThreadMaxComments, issueThreadMaxBytes)
-	if err != nil {
-		slog.Warn("failed to fetch issue comments", "job", j.JobKey, "owner", j.Owner, "repo", j.Repo, "issue", j.PRNumber, "error", err)
-		return nil
-	}
-	out := comments[:0]
-	for _, c := range comments {
-		if strings.Contains(c.Body, "<!-- elyoraa-in-progress -->") {
-			continue
-		}
-		out = append(out, c)
-	}
-	return out
-}
-
-func (r *ReviewUsecase) renderIssuePrompt(j *domain.Review, thread []github.IssueComment) (string, error) {
+func (r *ReviewUsecase) renderIssuePrompt(j *domain.Review, thread []ConversationEntry) (string, error) {
 	tmpl, err := template.ParseFiles(filepath.Join(r.cfg.PromptsDir, "issue.md"))
 	if err != nil {
 		return "", err
@@ -525,6 +535,8 @@ const maxCreatedIssues = 10
 
 // parseIssueActions extracts a trailing ```json action block from Devin's
 // reply, returning the actions and the reply text with the block removed.
+// Any well-formed actions block is stripped — even an empty create_issues —
+// so protocol JSON never leaks into the posted reply.
 func parseIssueActions(out string) (issueActions, string) {
 	var acts issueActions
 	matches := jsonBlockRegex.FindAllStringSubmatchIndex(out, -1)
@@ -532,7 +544,11 @@ func parseIssueActions(out string) (issueActions, string) {
 		return acts, out
 	}
 	last := matches[len(matches)-1]
-	if err := json.Unmarshal([]byte(out[last[2]:last[3]]), &acts); err != nil || len(acts.CreateIssues) == 0 {
+	if err := json.Unmarshal([]byte(out[last[2]:last[3]]), &acts); err != nil {
+		return issueActions{}, out
+	}
+	if acts.CreateIssues == nil {
+		// Parsed but not an actions block (illustrative JSON) — leave it.
 		return issueActions{}, out
 	}
 	cleaned := strings.TrimSpace(out[:last[0]] + out[last[1]:])
@@ -540,8 +556,16 @@ func parseIssueActions(out string) (issueActions, string) {
 }
 
 // createIssues creates GitHub issues for an accepted breakdown proposal,
-// resolving suggested labels against the repo's label set.
+// resolving suggested labels against the repo's label set. Final gate: the
+// trigger's author_association must be collaborator-level — every caller's
+// own check could miss a path, and on a public repo an unauthorized
+// "create the issues" must fail here if nowhere else.
 func (r *ReviewUsecase) createIssues(ctx context.Context, j *domain.Review, props []domain.ProposedIssue) []github.CreatedIssue {
+	if !mayCreateIssues(j.TriggerAssociation) {
+		slog.Warn("issue creation blocked: trigger lacks collaborator association",
+			"job", j.JobKey, "association", j.TriggerAssociation)
+		return nil
+	}
 	if len(props) > maxCreatedIssues {
 		props = props[:maxCreatedIssues]
 	}
@@ -551,6 +575,11 @@ func (r *ReviewUsecase) createIssues(ctx context.Context, j *domain.Review, prop
 		suggested = append(suggested, p.Labels...)
 	}
 	resolved := r.gh.ResolveLabels(ctx, j.InstallationID, j.Owner, j.Repo, []string{r.cfg.BotHandle}, suggested)
+
+	// A hidden marker ties each created issue back to its source — future
+	// dedup ("did we already file this?") can search for it instead of
+	// trusting prompt text.
+	srcMarker := fmt.Sprintf("<!-- elyoraa:src=%s/%s#%d job=%s -->", j.Owner, j.Repo, j.PRNumber, j.JobKey)
 
 	var created []github.CreatedIssue
 	for _, p := range props {
@@ -568,7 +597,7 @@ func (r *ReviewUsecase) createIssues(ctx context.Context, j *domain.Review, prop
 			}
 		}
 
-		ci, err := r.gh.CreateIssue(ctx, j.InstallationID, j.Owner, j.Repo, title, p.Body, labels)
+		ci, err := r.gh.CreateIssue(ctx, j.InstallationID, j.Owner, j.Repo, title, p.Body+"\n\n"+srcMarker, labels)
 		if err != nil {
 			slog.Warn("failed to create issue", "job", j.JobKey, "title", title, "error", err)
 			continue
@@ -577,6 +606,14 @@ func (r *ReviewUsecase) createIssues(ctx context.Context, j *domain.Review, prop
 		created = append(created, *ci)
 	}
 	return created
+}
+
+// annotatePhase records a job's current phase on its tracker record — a gate
+// that triaged to "review" must read as a review for audit and calibration.
+func (r *ReviewUsecase) annotatePhase(ctx context.Context, key, typ string) {
+	if r.tracker != nil {
+		r.tracker.Annotate(ctx, key, queue.JobAnnotation{Type: typ})
+	}
 }
 
 // processOversize handles a PR that exceeds the review-time budget. Instead
@@ -593,9 +630,9 @@ func (r *ReviewUsecase) processOversize(ctx context.Context, j *domain.Review, w
 		"est_minutes", size.EstMinutes, "budget_minutes", jobBudget(r.cfg, *j),
 		"truncated", size.Truncated, "create_mode", j.SplitCreate)
 
-	// PR conversation thread — in create mode the bot's earlier proposal and
-	// the human's acceptance live here.
-	thread := r.fetchIssueThread(ctx, j)
+	// PR conversation — in create mode the bot's earlier proposal and the
+	// human's acceptance live here.
+	thread := r.fetchConversation(ctx, j)
 
 	prompt, err := r.renderSplitPrompt(j, prInfo, size, j.SplitCreate, thread)
 	if err != nil {
@@ -604,7 +641,7 @@ func (r *ReviewUsecase) processOversize(ctx context.Context, j *domain.Review, w
 		return attempts, fmt.Errorf("render split prompt: %w", err)
 	}
 
-	out, attempts, err := r.runDevin(ctx, j, worktree, prompt, validateSplitOutput)
+	out, attempts, _, err := r.runDevin(ctx, j, worktree, prompt, validateSplitOutput)
 	if err != nil {
 		if ctx.Err() == context.Canceled {
 			r.updatePending(context.Background(), j, "Review cancelled: a newer push replaced this one.")
@@ -622,9 +659,11 @@ func (r *ReviewUsecase) processOversize(ctx context.Context, j *domain.Review, w
 		response = "No output from analysis."
 	}
 
-	if len(actions.CreateIssues) > 0 {
-		created := r.createIssues(ctx, j, actions.CreateIssues)
-		if len(created) > 0 {
+	// A superseded run must not create issues — a newer job owns the slot.
+	if ctx.Err() == nil && len(actions.CreateIssues) > 0 {
+		if !mayCreateIssues(j.TriggerAssociation) {
+			response += "\n\n_Issue creation skipped — only repository collaborators can create issues._"
+		} else if created := r.createIssues(ctx, j, actions.CreateIssues); len(created) > 0 {
 			var sb strings.Builder
 			sb.WriteString(response)
 			sb.WriteString("\n\n**Created issues:**\n")
@@ -652,7 +691,7 @@ func (r *ReviewUsecase) processOversize(ctx context.Context, j *domain.Review, w
 	return attempts, nil
 }
 
-func (r *ReviewUsecase) renderSplitPrompt(j *domain.Review, prInfo *github.PRInfo, size prSize, createMode bool, thread []github.IssueComment) (string, error) {
+func (r *ReviewUsecase) renderSplitPrompt(j *domain.Review, prInfo *github.PRInfo, size prSize, createMode bool, thread []ConversationEntry) (string, error) {
 	tmpl, err := template.ParseFiles(filepath.Join(r.cfg.PromptsDir, "split.md"))
 	if err != nil {
 		return "", err
@@ -795,21 +834,25 @@ const devinPreflightTimeout = 60 * time.Second
 // never silently reach the caller (e.g. an unparseable review approving a PR).
 // It returns the combined output, the number of attempts used, and the final
 // error (if any).
-func (r *ReviewUsecase) runDevin(ctx context.Context, j *domain.Review, worktree, prompt string, validate func(string) error) (string, int, error) {
+// The lastDuration return is the final attempt's wall time (preflight +
+// exec), recorded for calibration — pickup→finish includes retry backoffs
+// that would otherwise depress the measured lines-per-minute rate.
+func (r *ReviewUsecase) runDevin(ctx context.Context, j *domain.Review, worktree, prompt string, validate func(string) error) (string, int, time.Duration, error) {
 	tmpDir, err := os.MkdirTemp("", "elyoraa-review-*")
 	if err != nil {
-		return "", 0, err
+		return "", 0, 0, err
 	}
 	defer os.RemoveAll(tmpDir)
 
 	promptFile := filepath.Join(tmpDir, "prompt.md")
 	if err := os.WriteFile(promptFile, []byte(prompt), 0o644); err != nil {
-		return "", 0, err
+		return "", 0, 0, err
 	}
 
+	model := r.jobModel(j)
 	args := []string{
 		"-p",
-		"--model", r.cfg.DevinModel,
+		"--model", model,
 		"--config", filepath.Join(r.cfg.DevinConfigDir, "devin-config.json"),
 		"--respect-workspace-trust", "false",
 		"--prompt-file", promptFile,
@@ -829,8 +872,9 @@ func (r *ReviewUsecase) runDevin(ctx context.Context, j *domain.Review, worktree
 	}
 
 	for attempt := 1; ; attempt++ {
-		attemptCtx, cancel := context.WithTimeout(ctx, r.attemptTimeout())
-		log := r.jobLogger(j, attempt, worktree, args)
+		attemptCtx, cancel := context.WithTimeout(ctx, r.attemptTimeout(j))
+		log := r.jobLogger(j, attempt, worktree, args, model)
+		attemptStart := time.Now()
 
 		var out string
 		var runErr error
@@ -838,7 +882,7 @@ func (r *ReviewUsecase) runDevin(ctx context.Context, j *domain.Review, worktree
 		reason := "preflight"
 
 		if r.cfg.DevinPreflightCheck {
-			if perr := r.devinPreflight(attemptCtx, worktree); perr != nil {
+			if perr := r.devinPreflight(attemptCtx, worktree, model); perr != nil {
 				runErr = fmt.Errorf("devin preflight: %w", perr)
 				if rsn, det := deterministicDevinReason(runErr, runErr.Error()); det {
 					transient, reason = false, rsn
@@ -860,7 +904,7 @@ func (r *ReviewUsecase) runDevin(ctx context.Context, j *domain.Review, worktree
 		cancel()
 
 		if runErr == nil {
-			return out, attempt, nil
+			return out, attempt, time.Since(attemptStart), nil
 		}
 
 		tail := tailString(out, maxOutputLogBytes)
@@ -870,20 +914,20 @@ func (r *ReviewUsecase) runDevin(ctx context.Context, j *domain.Review, worktree
 			} else {
 				log.Error("devin run failed", "error", runErr, "transient", transient, "reason", reason, "output", tail)
 			}
-			return out, attempt, runErr
+			return out, attempt, time.Since(attemptStart), runErr
 		}
 
 		wait := r.backoff(attempt)
 		log.Warn("devin attempt failed, will retry", "error", runErr, "reason", reason, "output", tail, "retry_in", wait.String())
 		if !sleepCtx(ctx, wait) {
-			return "", attempt, ctx.Err()
+			return "", attempt, 0, ctx.Err()
 		}
 	}
 }
 
 // devinPreflight verifies the devin binary is usable: `devin models list` must
-// succeed and list the configured model.
-func (r *ReviewUsecase) devinPreflight(ctx context.Context, worktree string) error {
+// succeed and list the model this job will run with.
+func (r *ReviewUsecase) devinPreflight(ctx context.Context, worktree, model string) error {
 	pfCtx, cancel := context.WithTimeout(ctx, devinPreflightTimeout)
 	defer cancel()
 
@@ -896,8 +940,8 @@ func (r *ReviewUsecase) devinPreflight(ctx context.Context, worktree string) err
 		}
 		return fmt.Errorf("models list: %w: %s", err, tailString(string(out), 2048))
 	}
-	if r.cfg.DevinModel != "" && !strings.Contains(string(out), r.cfg.DevinModel) {
-		return fmt.Errorf("configured model %q not present in `devin models list` output", r.cfg.DevinModel)
+	if model != "" && !strings.Contains(string(out), model) {
+		return fmt.Errorf("configured model %q not present in `devin models list` output", model)
 	}
 	return nil
 }
@@ -914,13 +958,43 @@ func (r *ReviewUsecase) execDevin(ctx context.Context, worktree string, args []s
 	return string(out), err
 }
 
-// attemptTimeout returns the per-attempt timeout; defaults to the whole-review
-// timeout when DEVIN_ATTEMPT_TIMEOUT is unset.
-func (r *ReviewUsecase) attemptTimeout() time.Duration {
+// jobModel returns the Devin model for this job type: dedicated lighter
+// models may handle routing/triage while reviews keep DEVIN_MODEL.
+func (r *ReviewUsecase) jobModel(j *domain.Review) string {
+	switch {
+	case j.IsRespond():
+		if r.cfg.RespondModel != "" {
+			return r.cfg.RespondModel
+		}
+	case j.IsGate():
+		if r.cfg.GateModel != "" {
+			return r.cfg.GateModel
+		}
+		if r.cfg.RespondModel != "" {
+			return r.cfg.RespondModel
+		}
+	}
+	return r.cfg.DevinModel
+}
+
+// jobTimeout returns the overall processing budget for this job type.
+// Gate jobs get the full review budget — the triage verdict transitions them
+// into a review or split, which needs the remaining time. GATE_TIMEOUT bounds
+// only the triage pass itself (see triageGate).
+func (r *ReviewUsecase) jobTimeout(j *domain.Review) time.Duration {
+	if j.IsRespond() {
+		return r.cfg.RespondTimeout
+	}
+	return r.cfg.ReviewTimeout
+}
+
+// attemptTimeout returns the per-attempt timeout; defaults to the job's
+// overall timeout when DEVIN_ATTEMPT_TIMEOUT is unset.
+func (r *ReviewUsecase) attemptTimeout(j *domain.Review) time.Duration {
 	if r.cfg.DevinAttemptTimeout > 0 {
 		return r.cfg.DevinAttemptTimeout
 	}
-	return r.cfg.ReviewTimeout
+	return r.jobTimeout(j)
 }
 
 // backoff returns the wait before retry attempt n (1-indexed).
@@ -936,7 +1010,7 @@ func (r *ReviewUsecase) backoff(retry int) time.Duration {
 }
 
 // jobLogger returns a logger carrying the full job context.
-func (r *ReviewUsecase) jobLogger(j *domain.Review, attempt int, workdir string, args []string) *slog.Logger {
+func (r *ReviewUsecase) jobLogger(j *domain.Review, attempt int, workdir string, args []string, model string) *slog.Logger {
 	return slog.With(
 		"job", j.JobKey,
 		"delivery", j.DeliveryID,
@@ -945,7 +1019,7 @@ func (r *ReviewUsecase) jobLogger(j *domain.Review, attempt int, workdir string,
 		"pr", j.PRNumber,
 		"type", j.Type,
 		"attempt", attempt,
-		"model", r.cfg.DevinModel,
+		"model", model,
 		"workdir", workdir,
 		"argv", redactArgs(r.cfg.DevinBin, args),
 	)
@@ -1162,7 +1236,7 @@ func (r *ReviewUsecase) reconcileFindings(ctx context.Context, j *domain.Review,
 		return
 	}
 
-	out, _, err := r.runDevin(ctx, j, worktree, prompt, validateReconcileOutput)
+	out, _, _, err := r.runDevin(ctx, j, worktree, prompt, validateReconcileOutput)
 	if err != nil {
 		if ctx.Err() != nil {
 			return // job cancelled or deadline — don't fabricate statuses

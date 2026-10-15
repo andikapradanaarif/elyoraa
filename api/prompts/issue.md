@@ -21,7 +21,7 @@ Below is the comment thread on this issue, oldest first. Comments marked _(bot)_
 
 ## {{range .Thread}}
 
-**@{{.Author}}**{{if .IsBot}} _(bot)_{{end}} — {{.CreatedAt.Format "2006-01-02 15:04 UTC"}}:
+**@{{.Author}}**{{if .IsBot}} _(bot)_{{end}}{{if ne .Kind "comment"}} [{{.Kind}}{{if .Path}} `{{.Path}}:{{.Line}}`{{end}}]{{end}} — {{.CreatedAt.Format "2006-01-02 15:04 UTC"}}:
 
 {{.Body}}
 {{end}}
@@ -86,6 +86,7 @@ The repository is **not cloned on this server**. You cannot search or read the c
 
    Rules for this block:
    - Emit it **only on explicit human acceptance** — never when merely proposing a breakdown.
+   - If no earlier proposal from you is visible in the thread, do **not** emit the block — propose the breakdown first and ask for acceptance.
    - Maximum 10 issues. Every body must stand alone — no "see above" references.
    - Use labels matching the repository's conventions (e.g. `enhancement`, `bug`, `refactor`, `chore`, `documentation`, `testing`, `performance`, `security`). Unknown labels are dropped; the bot's own tag is added automatically, so do not include it.
    - The JSON block is metadata — it is stripped from the posted comment, the issues are created, and links are appended under your reply automatically. Do not invent issue numbers; acknowledge the acceptance in your reply text instead.

@@ -37,12 +37,11 @@ func (d *Dedup) TryStart(parent context.Context, j domain.Review) (context.Conte
 	defer d.mu.Unlock()
 
 	if st, ok := d.running[j.JobKey]; ok {
-		// A review request supersedes a queued/running split proposal for the
-		// same SHA — an explicit "review anyway" must not be dropped as a
-		// duplicate while the gate's proposal is still pending. No key-level
-		// tombstone is set: the superseded instance is rejected by the
-		// delivery-ID check in BindCancel, and the new job must still bind.
-		if st.job == nil || !st.job.IsSplit() || j.IsSplit() || j.IsIssue() {
+		// Supersedes share a key but carry newer intent — see canSupersede.
+		// No key-level tombstone is set: the superseded instance is rejected
+		// by the delivery-ID check in BindCancel, and the new job must still
+		// bind.
+		if st.job == nil || !canSupersede(st.job, &j) {
 			return nil, nil, false
 		}
 		if j.PendingCommentID == 0 {
@@ -56,17 +55,21 @@ func (d *Dedup) TryStart(parent context.Context, j domain.Review) (context.Conte
 	// Clear any tombstone for this exact key so a manual retry can bind again.
 	delete(d.replaced, j.JobKey)
 
-	// Replace any running job for the same PR.
-	for key, st := range d.running {
-		if strings.HasPrefix(key, prKey+"/") && key != j.JobKey {
-			if j.PendingCommentID == 0 && st.job != nil {
-				j.PendingCommentID = st.job.PendingCommentID
+	// Replace any running job for the same PR. Respond jobs skip this loop:
+	// they live outside the review keyspace and must never cancel a running
+	// review (two consecutive mentions on one PR must both run).
+	if !j.IsRespond() {
+		for key, st := range d.running {
+			if strings.HasPrefix(key, prKey+"/") && key != j.JobKey {
+				if j.PendingCommentID == 0 && st.job != nil {
+					j.PendingCommentID = st.job.PendingCommentID
+				}
+				for _, c := range st.cancels {
+					c()
+				}
+				delete(d.running, key)
+				d.replaced[key] = struct{}{}
 			}
-			for _, c := range st.cancels {
-				c()
-			}
-			delete(d.running, key)
-			d.replaced[key] = struct{}{}
 		}
 	}
 
@@ -125,7 +128,61 @@ func (d *Dedup) Active() int {
 	return len(d.running)
 }
 
+// canSupersede reports whether n may replace the in-flight job cur that shares
+// its key. The rule is one origin-strength table: a job may supersede another
+// iff its origin is stronger-or-equal and it is not a literal redelivery
+// (delivery IDs differ). Automated work (rank 0) never supersedes — so an
+// enqueue-time split can never kill a review a gate already committed to,
+// which is why gate transitions sync the slot via UpdateJob.
+func canSupersede(cur, n *domain.Review) bool {
+	// A redelivery carries the same delivery ID — a duplicate, never a
+	// supersede. Without this the superseded instance's Done() could cancel
+	// the replacement's slot (both must be non-empty: dispatched jobs and
+	// manual retries legitimately share ""-adjacent space).
+	if cur.DeliveryID != "" && n.DeliveryID != "" && cur.DeliveryID == n.DeliveryID {
+		return false
+	}
+	if cur.IsRespond() || n.IsRespond() {
+		// Respond keys are trigger-scoped: a comment edit reuses the trigger
+		// ID but gets a fresh delivery ID, so the newer text wins. A
+		// redelivery was already filtered above.
+		return cur.IsRespond() && n.IsRespond()
+	}
+	if cur.IsIssue() || n.IsIssue() {
+		return false
+	}
+	nRank, curRank := n.IntentRank(), cur.IntentRank()
+	if nRank == 0 {
+		return false
+	}
+	// Stronger intent wins. Equal rank only wins across a type change (the
+	// human redirected intent — e.g. a dispatched review after a dispatched
+	// split); equal rank and same type is a duplicate of intent, and
+	// restarting a job mid-side-effects (a second acceptance killing a
+	// running issue-creation) risks duplicate work.
+	return nRank > curRank || (nRank == curRank && n.Type != cur.Type)
+}
+
+// UpdateJob mutates the stored copy of an in-flight job — used when a job
+// transitions phases (e.g. a gate verdict turns it into a review or split)
+// so same-key supersede rules see the current type, not the entry-time one.
+func (d *Dedup) UpdateJob(key string, mutate func(*domain.Review)) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if st, ok := d.running[key]; ok && st.job != nil {
+		mutate(st.job)
+	}
+}
+
 // JobKey returns the canonical key for a job.
 func JobKey(owner, repo string, prNumber int, headSHA string) string {
 	return fmt.Sprintf("%s/%s/%d/%s", owner, repo, prNumber, headSHA)
+}
+
+// RespondKey returns the job key for a mention-routing (respond) job, keyed by
+// the trigger ID (comment/review/issue ID from the payload — stable across
+// redelivery). It lives outside the review keyspace: consecutive mentions on
+// one PR each get a slot, and a respond job can never collide with a review.
+func RespondKey(owner, repo string, number int, triggerID int64) string {
+	return fmt.Sprintf("respond/%s/%s/%d/%d", owner, repo, number, triggerID)
 }

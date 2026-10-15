@@ -69,6 +69,12 @@ func jobRecordJSON(j queue.JobRecord) map[string]any {
 		"enqueued_at": j.EnqueuedAt,
 		"updated_at":  j.UpdatedAt,
 	}
+	if j.Job.ParentKey != "" {
+		m["parent_key"] = j.Job.ParentKey
+	}
+	if j.Job.TriggerAuthor != "" {
+		m["trigger_author"] = j.Job.TriggerAuthor
+	}
 	if j.FinishedAt != nil {
 		m["finished_at"] = *j.FinishedAt
 	}

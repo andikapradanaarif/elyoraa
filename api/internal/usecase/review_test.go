@@ -167,10 +167,10 @@ func TestRenderIssuePrompt(t *testing.T) {
 		TriggerComment: "@elyoraa what do you think?",
 		RepoAvailable:  true,
 	}
-	thread := []github.IssueComment{
-		{Author: "alice", Body: "@elyoraa what do you think?", CreatedAt: time.Now()},
-		{Author: "elyoraa[bot]", Body: "This is too big; proposed breakdown…", CreatedAt: time.Now(), IsBot: true},
-		{Author: "alice", Body: "go ahead", CreatedAt: time.Now()},
+	thread := []ConversationEntry{
+		{Author: "alice", Body: "@elyoraa what do you think?", CreatedAt: time.Now(), Kind: "comment"},
+		{Author: "elyoraa[bot]", Body: "This is too big; proposed breakdown…", CreatedAt: time.Now(), IsBot: true, Kind: "comment"},
+		{Author: "alice", Body: "go ahead", CreatedAt: time.Now(), Kind: "comment"},
 	}
 
 	out, err := r.renderIssuePrompt(j, thread)

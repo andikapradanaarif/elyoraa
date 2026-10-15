@@ -321,6 +321,11 @@ func (u *WebhookUsecase) handleIssueComment(ctx context.Context, deliveryID stri
 			PRLabels:           labels,
 			EnqueuedAt:         time.Now(),
 		}
+		if mentionRouterFor(u.cfg, rc) == "agent" && mentionCommand(comment.GetBody()) == "" {
+			review.Type = "respond"
+			review.JobKey = dedup.RespondKey(owner, repoName, issueNumber, comment.GetID())
+		}
+
 		// The fetch above already produced per-file stats — the gate is exact.
 		u.applySizeGate(ctx, &review, rc, prInfo, sizeStats{})
 
@@ -345,6 +350,11 @@ func (u *WebhookUsecase) handleIssueComment(ctx context.Context, deliveryID stri
 		PRLabels:           labels,
 		EnqueuedAt:         time.Now(),
 	}
+	if mentionRouterFor(u.cfg, rc) == "agent" {
+		review.Type = "respond"
+		review.JobKey = dedup.RespondKey(owner, repoName, issueNumber, comment.GetID())
+	}
+
 	return u.enqueueReview(ctx, review, u.commentWebhookEvent(deliveryID, cmEvent, body, "received", ""), rc)
 }
 
@@ -355,12 +365,85 @@ func (u *WebhookUsecase) isBotMentioned(body string) bool {
 	return strings.Contains(body, "@"+handle) || strings.Contains(body, handle)
 }
 
-// isRereviewRequest reports whether a comment is asking the bot to rereview a PR.
-func (u *WebhookUsecase) isRereviewRequest(body string) bool {
-	if !u.isBotMentioned(body) {
+// mentionCommand parses exact slash commands that bypass both the keyword
+// router and the respond agent — `@elyoraa /review`, `/split`, `/accept`.
+// Returns "" when the trigger is natural language.
+func mentionCommand(body string) string {
+	for _, field := range strings.Fields(body) {
+		switch strings.ToLower(field) {
+		case "/review", "/rereview":
+			return "review"
+		case "/split":
+			return "split"
+		case "/accept":
+			return "accept"
+		}
+	}
+	return ""
+}
+
+// mayCreateIssues reports whether the trigger's author_association permits
+// issue-creating actions. Anything outside collaborator-level trust fails
+// closed — on a public repo a stranger's "create the issues" must not conjure
+// issues.
+func mayCreateIssues(association string) bool {
+	switch strings.ToUpper(association) {
+	case "OWNER", "MEMBER", "COLLABORATOR":
+		return true
+	}
+	return false
+}
+
+// mayDispatchReports whether the trigger may request work: repository
+// collaborators, or the PR/issue author asking about their own change.
+func mayDispatch(j *domain.Review) bool {
+	if mayCreateIssues(j.TriggerAssociation) {
+		return true
+	}
+	return j.TriggerAuthor != "" && j.Author != "" &&
+		strings.EqualFold(j.TriggerAuthor, j.Author)
+}
+
+// splitProposalOutstanding reports whether the newest split job for this PR
+// left an un-consumed proposal: it ran in propose mode and completed (or is
+// still running). Once a create-mode split completes, the proposal is
+// consumed — a second acceptance must not create issues again.
+func splitProposalOutstanding(t queue.JobTracker, ctx context.Context, j *domain.Review) bool {
+	if t == nil {
 		return false
 	}
-	return true
+	for _, rec := range t.List(ctx) { // most recently updated first
+		if rec.Owner != j.Owner || rec.Repo != j.Repo || rec.PRNumber != j.PRNumber ||
+			rec.Type != "split" {
+			continue
+		}
+		if rec.Job.SplitCreate {
+			return false // already consumed
+		}
+		return rec.Status == queue.JobStatusCompleted ||
+			rec.Status == queue.JobStatusQueued ||
+			rec.Status == queue.JobStatusProcessing
+	}
+	return false
+}
+
+// priorBotReply reports whether a conversational bot job (issue analysis or
+// respond) previously completed on this issue — the "proposal" for an issue
+// thread is a breakdown inside that reply, so a completed conversational job
+// is the existence check for `create_issues`. This blocks the zero-history
+// case where a mention conjures issues the bot never proposed.
+func priorBotReply(t queue.JobTracker, ctx context.Context, j *domain.Review) bool {
+	if t == nil {
+		return false
+	}
+	for _, rec := range t.List(ctx) {
+		if rec.Owner == j.Owner && rec.Repo == j.Repo && rec.PRNumber == j.PRNumber &&
+			rec.Status == queue.JobStatusCompleted && rec.JobKey != j.JobKey &&
+			(rec.Type == "issue" || rec.Type == "respond") {
+			return true
+		}
+	}
+	return false
 }
 
 // sizeStats carries the PR size counters GitHub embeds in webhook event
@@ -371,16 +454,15 @@ type sizeStats struct {
 	changedFiles int
 }
 
-// applySizeGate converts an oversize review job into a split-proposal job at
-// enqueue time, so the verdict isn't delayed by queue wait. The repo's
-// .elyoraa.yml overrides the global budget/rate and adds ignored_paths to the
-// generated-file heuristics. The trigger comment decides the outcome:
-// explicit review keywords keep it a review job, acceptance keywords turn it
-// into a split job in create mode, anything else proposes the split. An empty
-// payload without prInfo falls back to one GetPR call; a fetch failure leaves
-// the job as a review.
+// applySizeGate converts an oversize review job into a split-proposal job (or
+// a gate triage job when SIZE_GATE_MODE=agent) at enqueue time, so the verdict
+// isn't delayed by queue wait. Intent is checked before measurement: explicit
+// human commands are honored even when a fresh estimate no longer says the PR
+// is too big — acceptance keywords ("create the issues") must work on a PR
+// that re-measures under budget. An empty payload without prInfo falls back
+// to one GetPR call; a fetch failure leaves the job as-is.
 func (u *WebhookUsecase) applySizeGate(ctx context.Context, r *domain.Review, rc domain.RepoConfig, prInfo *github.PRInfo, st sizeStats) {
-	if !u.cfg.PRSizeGate || r.IsIssue() {
+	if r.IsIssue() {
 		return
 	}
 
@@ -418,13 +500,63 @@ func (u *WebhookUsecase) applySizeGate(ctx context.Context, r *domain.Review, rc
 		size = estimatePRSizeWith(info, lpm, gen)
 	}
 
-	// The estimate is recorded on every non-issue job — completed reviews feed
-	// it to rate calibration.
+	// The estimate is recorded on every non-issue job — respond jobs consume
+	// it as prompt context, completed reviews feed it to rate calibration.
 	r.SizeEstMinutes = size.EstMinutes
 	r.SizeLines = size.Additions + size.Deletions
 	r.SizeOversize = size.tooBig(budget)
 	r.BudgetMinutes = budget
 	r.IgnoredPaths = rc.IgnoredPaths
+
+	// Respond jobs are never gated — the agent decides from these stats.
+	if r.IsRespond() {
+		return
+	}
+
+	// Slash commands are exact user intent — they bypass the gate entirely.
+	// `/accept` still requires an outstanding proposal and collaborator
+	// permissions; without them it degrades to a plain mention (review).
+	switch mentionCommand(r.TriggerComment) {
+	case "review":
+		r.Origin = domain.OriginDispatched
+		return
+	case "split":
+		r.Type = "split"
+		r.Origin = domain.OriginDispatched
+		return
+	case "accept":
+		if mayCreateIssues(r.TriggerAssociation) && splitProposalOutstanding(u.q.Tracker(), ctx, r) {
+			r.Type = "split"
+			r.SplitCreate = true
+			r.Origin = domain.OriginAccepted
+		} else {
+			r.Origin = domain.OriginDispatched
+		}
+		return
+	}
+
+	if !u.cfg.PRSizeGate {
+		return
+	}
+
+	// Intent before measurement: explicit human commands are honored even
+	// when the fresh estimate no longer says the PR is too big. Acceptance
+	// additionally requires an outstanding proposal on record — the
+	// acceptance keywords are everyday phrases ("go ahead", "breakdown")
+	// that must not conjure issue creation on a PR that was never offered
+	// one — and collaborator permissions, since these keywords create issues.
+	switch classifyOversize(r.TriggerComment) {
+	case oversizeReview:
+		r.Origin = domain.OriginMentionKeyword
+		return
+	case oversizeCreate:
+		if mayCreateIssues(r.TriggerAssociation) && splitProposalOutstanding(u.q.Tracker(), ctx, r) {
+			r.Type = "split"
+			r.SplitCreate = true
+			r.Origin = domain.OriginAccepted
+		}
+		return
+	}
 
 	if !r.SizeOversize {
 		return
@@ -436,15 +568,19 @@ func (u *WebhookUsecase) applySizeGate(ctx context.Context, r *domain.Review, rc
 		"est_minutes", size.EstMinutes, "budget_minutes", budget,
 		"truncated", size.Truncated)
 
-	switch classifyOversize(r.TriggerComment) {
-	case oversizeReview:
-		// Human explicitly asked for the review — keep it a review job.
-	case oversizeCreate:
-		r.Type = "split"
-		r.SplitCreate = true
-	default:
-		r.Type = "split"
+	if sizeGateModeFor(u.cfg, rc) == "agent" {
+		// Nomination bands: triage is only worth a run near the boundary.
+		// Clearly-huge or truncated PRs go straight to the split proposal —
+		// no amount of "actually it's simple" rescues 3× budget or an
+		// unfetchably-large file list.
+		if size.Truncated || (budget > 0 && size.EstMinutes > 3*budget) {
+			r.Type = "split"
+			return
+		}
+		r.Type = "gate"
+		return
 	}
+	r.Type = "split"
 }
 
 func (u *WebhookUsecase) enqueueReview(ctx context.Context, review domain.Review, evt *domain.WebhookEvent, rc domain.RepoConfig) (domain.Review, error) {
@@ -728,6 +864,11 @@ func (u *WebhookUsecase) handlePullRequestReview(ctx context.Context, deliveryID
 		PRLabels:           labelNames(pr.Labels),
 		EnqueuedAt:         time.Now(),
 	}
+	if mentionRouterFor(u.cfg, rc) == "agent" && mentionCommand(review.GetBody()) == "" {
+		r.Type = "respond"
+		r.JobKey = dedup.RespondKey(owner, repoName, pr.GetNumber(), review.GetID())
+	}
+
 	u.applySizeGate(ctx, &r, rc, nil, sizeStats{
 		additions:    pr.GetAdditions(),
 		deletions:    pr.GetDeletions(),
@@ -827,6 +968,11 @@ func (u *WebhookUsecase) handlePullRequestReviewComment(ctx context.Context, del
 		PRLabels:           labelNames(pr.Labels),
 		EnqueuedAt:         time.Now(),
 	}
+	if mentionRouterFor(u.cfg, rc) == "agent" && mentionCommand(comment.GetBody()) == "" {
+		r.Type = "respond"
+		r.JobKey = dedup.RespondKey(owner, repoName, pr.GetNumber(), comment.GetID())
+	}
+
 	u.applySizeGate(ctx, &r, rc, nil, sizeStats{
 		additions:    pr.GetAdditions(),
 		deletions:    pr.GetDeletions(),
@@ -904,6 +1050,13 @@ func (u *WebhookUsecase) handleIssues(ctx context.Context, deliveryID string, bo
 		PRLabels:           labelNames(issue.Labels),
 		EnqueuedAt:         time.Now(),
 	}
+	if mentionRouterFor(u.cfg, rc) == "agent" {
+		r.Type = "respond"
+		r.JobKey = dedup.RespondKey(owner, repoName, issue.GetNumber(), issue.GetID())
+		// TriggerComment stays empty so enqueueReview's bot-authored-issue
+		// guard (IsBot && TriggerComment == "") keeps applying.
+	}
+
 	_ = u.store.Record(ctx, &domain.WebhookEvent{
 		DeliveryID: deliveryID, EventType: "issues",
 		Action: action, Owner: owner, Repo: repoName, PRNumber: issue.GetNumber(),
