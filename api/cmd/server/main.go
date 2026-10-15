@@ -74,7 +74,7 @@ func main() {
 		defer db.Close()
 	}
 
-	c := cache.New(cfg.WorkspaceBase, "/app/git-askpass.sh", tokenDir)
+	c := cache.New(cfg.WorkspaceBase, "/app/git-askpass.sh", tokenDir, cfg.GitBaseURL)
 	d := dedup.New()
 	m := metrics.New()
 	store := repository.NewWebhookStore(db)
@@ -91,7 +91,7 @@ func main() {
 	// queue back via setter: respond-job dispatch + prior-status lookup.
 	reviewUC.SetQueue(q)
 
-	webhookUC := usecase.NewWebhookUsecase(cfg, githubClient, d, q, store)
+	webhookUC := usecase.NewWebhookUsecase(cfg, githubClient, d, q, store, c, m)
 	h := handler.New(cfg, webhookUC, m)
 
 	// Jobs recorded as "processing" at boot were killed mid-flight by the
@@ -136,7 +136,6 @@ func main() {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	<-sig
-
 
 	// Stop accepting HTTP first, then drain workers: in-flight jobs keep
 	// their (root) context while we wait, so a clean shutdown lets a running

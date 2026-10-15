@@ -4,16 +4,20 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/andikapradanaarif/elyoraa/internal/config"
 	"github.com/andikapradanaarif/elyoraa/internal/dedup"
 	"github.com/andikapradanaarif/elyoraa/internal/domain"
+	"github.com/andikapradanaarif/elyoraa/internal/metrics"
 	"github.com/andikapradanaarif/elyoraa/internal/repository"
+	"github.com/andikapradanaarif/elyoraa/internal/repository/cache"
 	"github.com/andikapradanaarif/elyoraa/internal/repository/queue"
 	"github.com/andikapradanaarif/elyoraa/internal/service/github"
 	go_github "github.com/google/go-github/v88/github"
@@ -53,16 +57,28 @@ func WithDeliveryID(ctx context.Context, deliveryID string) context.Context {
 
 // WebhookUsecase validates and routes incoming GitHub webhooks.
 type WebhookUsecase struct {
-	cfg   *config.Config
-	gh    *github.Client
-	d     *dedup.Dedup
-	q     *queue.Queue
-	store repository.WebhookStore
+	cfg     *config.Config
+	gh      *github.Client
+	d       *dedup.Dedup
+	q       *queue.Queue
+	store   repository.WebhookStore
+	limiter *rateLimiter
+	cache   *cache.Cache
+	metrics *metrics.Registry
 }
 
 // NewWebhookUsecase creates a WebhookUsecase.
-func NewWebhookUsecase(cfg *config.Config, client *github.Client, d *dedup.Dedup, q *queue.Queue, store repository.WebhookStore) *WebhookUsecase {
-	return &WebhookUsecase{cfg: cfg, gh: client, d: d, q: q, store: store}
+func NewWebhookUsecase(cfg *config.Config, client *github.Client, d *dedup.Dedup, q *queue.Queue, store repository.WebhookStore, c *cache.Cache, m *metrics.Registry) *WebhookUsecase {
+	return &WebhookUsecase{
+		cfg:     cfg,
+		gh:      client,
+		d:       d,
+		q:       q,
+		store:   store,
+		limiter: newRateLimiter(cfg.MentionRateLimit, cfg.MentionRateWindow),
+		cache:   c,
+		metrics: m,
+	}
 }
 
 // Handle validates a webhook, records the event, and submits a review job to the queue.
@@ -88,6 +104,8 @@ func (u *WebhookUsecase) Handle(ctx context.Context, body []byte, signature stri
 		return u.handlePullRequestReviewComment(ctx, deliveryID, body)
 	case "issues":
 		return u.handleIssues(ctx, deliveryID, body)
+	case "reaction":
+		return u.handleReaction(ctx, deliveryID, body)
 	default:
 		_ = u.store.Record(ctx, &domain.WebhookEvent{
 			DeliveryID: deliveryID,
@@ -149,6 +167,7 @@ func (u *WebhookUsecase) handlePullRequest(ctx context.Context, deliveryID strin
 		return domain.Review{}, fmt.Errorf("invalid repository")
 	}
 	owner, repoName := ownerRepo[0], ownerRepo[1]
+	rc := u.repoConfig(ctx, owner, repoName, prEvent.GetInstallation().GetID())
 
 	review := domain.Review{
 		DeliveryID:     deliveryID,
@@ -161,18 +180,33 @@ func (u *WebhookUsecase) handlePullRequest(ctx context.Context, deliveryID strin
 		Author:         pr.GetUser().GetLogin(),
 		Title:          pr.GetTitle(),
 		Body:           pr.GetBody(),
+		PRLabels:       labelNames(pr.Labels),
 		EnqueuedAt:     time.Now(),
 	}
 
 	// The pull_request payload already carries the size counters — the gate
 	// costs no extra API call.
-	u.applySizeGate(ctx, &review, nil, sizeStats{
+	u.applySizeGate(ctx, &review, rc, nil, sizeStats{
 		additions:    pr.GetAdditions(),
 		deletions:    pr.GetDeletions(),
 		changedFiles: pr.GetChangedFiles(),
 	})
 
-	return u.enqueueReview(ctx, review, u.prWebhookEvent(deliveryID, prEvent, body, "received", ""))
+	return u.enqueueReview(ctx, review, u.prWebhookEvent(deliveryID, prEvent, body, "received", ""), rc)
+}
+
+// labelNames flattens the webhook payload's label objects to names.
+func labelNames(labels []*go_github.Label) []string {
+	if len(labels) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(labels))
+	for _, l := range labels {
+		if n := l.GetName(); n != "" {
+			names = append(names, n)
+		}
+	}
+	return names
 }
 
 func (u *WebhookUsecase) handleIssueComment(ctx context.Context, deliveryID string, body []byte) (domain.Review, error) {
@@ -251,6 +285,8 @@ func (u *WebhookUsecase) handleIssueComment(ctx context.Context, deliveryID stri
 
 	issueNumber := issue.GetNumber()
 	instID := cmEvent.GetInstallation().GetID()
+	rc := u.repoConfig(ctx, owner, repoName, instID)
+	labels := labelNames(issue.Labels)
 
 	// If the comment is on a PR, trigger a rereview.
 	if issue.IsPullRequest() {
@@ -268,42 +304,48 @@ func (u *WebhookUsecase) handleIssueComment(ctx context.Context, deliveryID stri
 		}
 
 		review := domain.Review{
-			DeliveryID:     deliveryID,
-			Owner:          owner,
-			Repo:           repoName,
-			PRNumber:       issueNumber,
-			HeadSHA:        prInfo.HeadSHA,
-			BaseSHA:        prInfo.BaseSHA,
-			InstallationID: instID,
-			Author:         prInfo.Author,
-			Title:          prInfo.Title,
-			Body:           prInfo.Body,
-			TriggerComment: comment.GetBody(),
-			EnqueuedAt:     time.Now(),
+			DeliveryID:         deliveryID,
+			Owner:              owner,
+			Repo:               repoName,
+			PRNumber:           issueNumber,
+			HeadSHA:            prInfo.HeadSHA,
+			BaseSHA:            prInfo.BaseSHA,
+			InstallationID:     instID,
+			Author:             prInfo.Author,
+			Title:              prInfo.Title,
+			Body:               prInfo.Body,
+			TriggerComment:     comment.GetBody(),
+			TriggerAuthor:      comment.GetUser().GetLogin(),
+			TriggerAssociation: comment.GetAuthorAssociation(),
+			Origin:             domain.OriginMentionKeyword,
+			PRLabels:           labels,
+			EnqueuedAt:         time.Now(),
 		}
-
 		// The fetch above already produced per-file stats — the gate is exact.
-		u.applySizeGate(ctx, &review, prInfo, sizeStats{})
+		u.applySizeGate(ctx, &review, rc, prInfo, sizeStats{})
 
-		return u.enqueueReview(ctx, review, u.commentWebhookEvent(deliveryID, cmEvent, body, "received", ""))
+		return u.enqueueReview(ctx, review, u.commentWebhookEvent(deliveryID, cmEvent, body, "received", ""), rc)
 	}
 
-	// Non-PR issue: trigger issue analysis.
+	// Non-PR issue: trigger issue analysis (or the respond agent).
 	review := domain.Review{
-		DeliveryID:     deliveryID,
-		Owner:          owner,
-		Repo:           repoName,
-		PRNumber:       issueNumber,
-		InstallationID: instID,
-		Author:         issue.GetUser().GetLogin(),
-		Title:          issue.GetTitle(),
-		Body:           issue.GetBody(),
-		Type:           "issue",
-		TriggerComment: comment.GetBody(),
-		EnqueuedAt:     time.Now(),
+		DeliveryID:         deliveryID,
+		Owner:              owner,
+		Repo:               repoName,
+		PRNumber:           issueNumber,
+		InstallationID:     instID,
+		Author:             issue.GetUser().GetLogin(),
+		Title:              issue.GetTitle(),
+		Body:               issue.GetBody(),
+		Type:               "issue",
+		TriggerComment:     comment.GetBody(),
+		TriggerAuthor:      comment.GetUser().GetLogin(),
+		TriggerAssociation: comment.GetAuthorAssociation(),
+		Origin:             domain.OriginMentionKeyword,
+		PRLabels:           labels,
+		EnqueuedAt:         time.Now(),
 	}
-
-	return u.enqueueReview(ctx, review, u.commentWebhookEvent(deliveryID, cmEvent, body, "received", ""))
+	return u.enqueueReview(ctx, review, u.commentWebhookEvent(deliveryID, cmEvent, body, "received", ""), rc)
 }
 
 // isBotMentioned reports whether a comment body mentions the bot handle.
@@ -330,27 +372,38 @@ type sizeStats struct {
 }
 
 // applySizeGate converts an oversize review job into a split-proposal job at
-// enqueue time, so the verdict (and its comment) isn't delayed by queue wait.
-// The trigger comment decides the outcome: explicit review keywords keep it a
-// review job, acceptance keywords turn it into a split job in create mode,
-// anything else proposes the split. An empty payload without prInfo falls
-// back to one GetPR call; a fetch failure leaves the job as a review.
-func (u *WebhookUsecase) applySizeGate(ctx context.Context, r *domain.Review, prInfo *github.PRInfo, st sizeStats) {
+// enqueue time, so the verdict isn't delayed by queue wait. The repo's
+// .elyoraa.yml overrides the global budget/rate and adds ignored_paths to the
+// generated-file heuristics. The trigger comment decides the outcome:
+// explicit review keywords keep it a review job, acceptance keywords turn it
+// into a split job in create mode, anything else proposes the split. An empty
+// payload without prInfo falls back to one GetPR call; a fetch failure leaves
+// the job as a review.
+func (u *WebhookUsecase) applySizeGate(ctx context.Context, r *domain.Review, rc domain.RepoConfig, prInfo *github.PRInfo, st sizeStats) {
 	if !u.cfg.PRSizeGate || r.IsIssue() {
 		return
 	}
 
 	// The rate is calibrated from recently completed reviews so the budget
-	// tracks real execution time; it falls back to config until then.
-	lpm := u.cfg.PRLinesPerMinute
+	// tracks real execution time; it falls back to config until then. A
+	// repo-level lines_per_minute overrides the config fallback.
+	lpm := linesPerMinuteFor(u.cfg, rc)
 	if t := u.q.Tracker(); t != nil {
-		lpm = calibratedLinesPerMinute(t.List(ctx), lpm)
+		lpm = calibratedLinesPerMinute(t.List(ctx), lpm, r.Owner, r.Repo)
+	}
+	budget := budgetMinutesFor(u.cfg, rc)
+
+	// ignored_paths from .elyoraa.yml joins the generated-file heuristics —
+	// it needs the per-file list, so it applies only when stats are present.
+	var gen func(string) bool
+	if len(rc.IgnoredPaths) > 0 {
+		gen = func(p string) bool { return ignoredPath(rc.IgnoredPaths, p) }
 	}
 
 	var size prSize
 	switch {
 	case prInfo != nil:
-		size = estimatePRSize(prInfo, lpm)
+		size = estimatePRSizeWith(prInfo, lpm, gen)
 	case st.additions+st.deletions+st.changedFiles > 0:
 		size = estimateFromCounts(st.additions, st.deletions, st.changedFiles, lpm, u.cfg.MaxChangedFiles)
 	default:
@@ -362,19 +415,25 @@ func (u *WebhookUsecase) applySizeGate(ctx context.Context, r *domain.Review, pr
 				"owner", r.Owner, "repo", r.Repo, "pr", r.PRNumber, "error", err)
 			return
 		}
-		size = estimatePRSize(info, lpm)
+		size = estimatePRSizeWith(info, lpm, gen)
 	}
 
+	// The estimate is recorded on every non-issue job — completed reviews feed
+	// it to rate calibration.
 	r.SizeEstMinutes = size.EstMinutes
 	r.SizeLines = size.Additions + size.Deletions
-	if !size.tooBig(u.cfg.PRReviewBudgetMinutes) {
+	r.SizeOversize = size.tooBig(budget)
+	r.BudgetMinutes = budget
+	r.IgnoredPaths = rc.IgnoredPaths
+
+	if !r.SizeOversize {
 		return
 	}
 
 	slog.Info("oversize PR at enqueue",
 		"owner", r.Owner, "repo", r.Repo, "pr", r.PRNumber,
 		"files", size.Files, "additions", size.Additions, "deletions", size.Deletions,
-		"est_minutes", size.EstMinutes, "budget_minutes", u.cfg.PRReviewBudgetMinutes,
+		"est_minutes", size.EstMinutes, "budget_minutes", budget,
 		"truncated", size.Truncated)
 
 	switch classifyOversize(r.TriggerComment) {
@@ -388,7 +447,7 @@ func (u *WebhookUsecase) applySizeGate(ctx context.Context, r *domain.Review, pr
 	}
 }
 
-func (u *WebhookUsecase) enqueueReview(ctx context.Context, review domain.Review, evt *domain.WebhookEvent) (domain.Review, error) {
+func (u *WebhookUsecase) enqueueReview(ctx context.Context, review domain.Review, evt *domain.WebhookEvent, rc domain.RepoConfig) (domain.Review, error) {
 	// Skip bot-authored PRs for auto-reviews, but allow explicit mentions
 	// (rereview/issue analysis) to proceed even if the PR was bot-authored.
 	if review.IsBot() && review.TriggerComment == "" {
@@ -399,7 +458,80 @@ func (u *WebhookUsecase) enqueueReview(ctx context.Context, review domain.Review
 		return domain.Review{}, nil
 	}
 
-	review.JobKey = dedup.JobKey(review.Owner, review.Repo, review.PRNumber, review.HeadSHA)
+	// .elyoraa.yml `enabled: false` opts the repo out entirely — drop
+	// silently (a visible "I'm disabled" reply per mention is spam).
+	if !repoEnabled(rc) {
+		if evt != nil {
+			_ = u.store.Record(ctx, evt)
+		}
+		_ = u.store.UpdateStatus(ctx, review.DeliveryID, "dropped", "repo disabled in "+repoConfigFile)
+		slog.Info("dropping job: repo disabled", "repo", review.Owner+"/"+review.Repo)
+		return domain.Review{}, nil
+	}
+
+	// The opt-out label suppresses automation, not humans: only jobs with no
+	// trigger author (pure auto-review) are skipped; an explicit mention
+	// overrides the label.
+	if review.TriggerAuthor == "" {
+		if lbl := skipLabelFor(u.cfg, rc); lbl != "" && slices.Contains(review.PRLabels, lbl) {
+			if evt != nil {
+				_ = u.store.Record(ctx, evt)
+			}
+			_ = u.store.UpdateStatus(ctx, review.DeliveryID, "dropped", "skip label "+lbl)
+			slog.Info("dropping job: skip label", "repo", review.Owner+"/"+review.Repo, "pr", review.PRNumber, "label", lbl)
+			return domain.Review{}, nil
+		}
+	}
+
+	// Persist the effective repo config on the job so Process doesn't have
+	// to re-read it — the file could change between enqueue and execution.
+	review.BudgetMinutes = budgetMinutesFor(u.cfg, rc)
+	review.IgnoredPaths = rc.IgnoredPaths
+
+	// Mention-triggered jobs are rate-limited per author per repo — every
+	// mention costs a Devin run. Auto-reviews carry no TriggerAuthor.
+	if review.TriggerAuthor != "" && !u.limiter.allow(review.TriggerAuthor+"@"+review.Owner+"/"+review.Repo, time.Now()) {
+		if evt != nil {
+			_ = u.store.Record(ctx, evt)
+		}
+		_ = u.store.UpdateStatus(ctx, review.DeliveryID, "dropped", "mention rate limit")
+		slog.Info("dropping mention: rate limited", "author", review.TriggerAuthor, "repo", review.Owner+"/"+review.Repo)
+		return domain.Review{}, ErrRateLimited
+	}
+
+	// A daily per-repo job cap bounds spend even for authorized triggers
+	// (webhook storms, mention loops). Dispatched jobs bypass this path and
+	// are bounded by RESPOND_MAX_ACTIONS instead.
+	if u.cfg.DailyJobCapPerRepo > 0 && u.jobsToday(ctx, review.Owner, review.Repo) >= u.cfg.DailyJobCapPerRepo {
+		if evt != nil {
+			_ = u.store.Record(ctx, evt)
+		}
+		_ = u.store.UpdateStatus(ctx, review.DeliveryID, "dropped", "daily job cap")
+		slog.Info("dropping job: daily repo cap", "repo", review.Owner+"/"+review.Repo)
+		return domain.Review{}, ErrCapped
+	}
+
+	// Respond jobs arrive with their own trigger-keyed JobKey; everything
+	// else keys on owner/repo/pr/sha.
+	if review.JobKey == "" {
+		review.JobKey = dedup.JobKey(review.Owner, review.Repo, review.PRNumber, review.HeadSHA)
+	}
+
+	// A respond job whose trigger already ran to completion must not re-run:
+	// `edited` events re-deliver the same trigger ID forever, and a typo fix
+	// on "@elyoraa create the issues" must not create the issues twice.
+	if review.IsRespond() {
+		if t := u.q.Tracker(); t != nil {
+			if rec, ok := t.Get(ctx, review.JobKey); ok && rec.Status == queue.JobStatusCompleted {
+				if evt != nil {
+					_ = u.store.Record(ctx, evt)
+				}
+				_ = u.store.UpdateStatus(ctx, review.DeliveryID, "dropped", "trigger already handled")
+				slog.Info("dropping redelivered/edited mention with completed job", "job", review.JobKey)
+				return domain.Review{}, nil
+			}
+		}
+	}
 
 	if evt != nil {
 		_ = u.store.Record(ctx, evt)
@@ -414,15 +546,9 @@ func (u *WebhookUsecase) enqueueReview(ctx context.Context, review domain.Review
 
 	// Post the in-progress comment if we don't already have one.
 	if job.PendingCommentID == 0 {
-		pendingBody := "Review in progress…\n\n<!-- elyoraa-in-progress -->"
-		if job.IsSplit() {
-			pendingBody = fmt.Sprintf(
-				"This PR looks too big for a single review (estimated ~%d min vs the %d min budget). Drafting a split proposal…\n\n<!-- elyoraa-in-progress -->",
-				job.SizeEstMinutes, u.cfg.PRReviewBudgetMinutes,
-			)
-		}
 		pendingCtx, cancel := context.WithTimeout(context.Background(), u.cfg.CommentTimeout)
-		id, err := u.gh.PostPendingComment(pendingCtx, job.InstallationID, job.Owner, job.Repo, job.PRNumber, pendingBody)
+		id, err := u.gh.PostPendingComment(pendingCtx, job.InstallationID, job.Owner, job.Repo, job.PRNumber,
+			pendingBody(job, jobBudget(u.cfg, *job)))
 		cancel()
 		if err != nil {
 			slog.Warn("failed to post pending comment", "error", err)
@@ -446,6 +572,24 @@ func (u *WebhookUsecase) enqueueReview(ctx context.Context, review domain.Review
 
 	_ = u.store.UpdateStatus(ctx, review.DeliveryID, "queued", "")
 	return *job, nil
+}
+
+// jobsToday counts tracker records for the repo started today (UTC). The
+// tracker is bounded (~1000 records memory / persistent for BoltDB), so a
+// full scan per enqueue is cheap relative to a Devin run.
+func (u *WebhookUsecase) jobsToday(ctx context.Context, owner, repo string) int {
+	t := u.q.Tracker()
+	if t == nil {
+		return 0
+	}
+	dayStart := time.Now().UTC().Truncate(24 * time.Hour)
+	n := 0
+	for _, rec := range t.List(ctx) {
+		if rec.Owner == owner && rec.Repo == repo && rec.StartedAt != nil && !rec.StartedAt.Before(dayStart) {
+			n++
+		}
+	}
+	return n
 }
 
 func (u *WebhookUsecase) deliveryID(ctx context.Context) string {
@@ -560,27 +704,31 @@ func (u *WebhookUsecase) handlePullRequestReview(ctx context.Context, deliveryID
 	ownerRepo := strings.SplitN(repo.GetFullName(), "/", 2)
 	owner, repoName := ownerRepo[0], ownerRepo[1]
 	instID := rvEvent.GetInstallation().GetID()
+	rc := u.repoConfig(ctx, owner, repoName, instID)
 
 	if pr.GetDraft() {
 		return domain.Review{}, nil
 	}
 
 	r := domain.Review{
-		DeliveryID:     deliveryID,
-		Owner:          owner,
-		Repo:           repoName,
-		PRNumber:       pr.GetNumber(),
-		HeadSHA:        pr.GetHead().GetSHA(),
-		BaseSHA:        pr.GetBase().GetSHA(),
-		InstallationID: instID,
-		Author:         pr.GetUser().GetLogin(),
-		Title:          pr.GetTitle(),
-		Body:           pr.GetBody(),
-		TriggerComment: review.GetBody(),
-		EnqueuedAt:     time.Now(),
+		DeliveryID:         deliveryID,
+		Owner:              owner,
+		Repo:               repoName,
+		PRNumber:           pr.GetNumber(),
+		HeadSHA:            pr.GetHead().GetSHA(),
+		BaseSHA:            pr.GetBase().GetSHA(),
+		InstallationID:     instID,
+		Author:             pr.GetUser().GetLogin(),
+		Title:              pr.GetTitle(),
+		Body:               pr.GetBody(),
+		TriggerComment:     review.GetBody(),
+		TriggerAuthor:      review.GetUser().GetLogin(),
+		TriggerAssociation: review.GetAuthorAssociation(),
+		Origin:             domain.OriginMentionKeyword,
+		PRLabels:           labelNames(pr.Labels),
+		EnqueuedAt:         time.Now(),
 	}
-
-	u.applySizeGate(ctx, &r, nil, sizeStats{
+	u.applySizeGate(ctx, &r, rc, nil, sizeStats{
 		additions:    pr.GetAdditions(),
 		deletions:    pr.GetDeletions(),
 		changedFiles: pr.GetChangedFiles(),
@@ -591,7 +739,7 @@ func (u *WebhookUsecase) handlePullRequestReview(ctx context.Context, deliveryID
 		Action: action, Owner: owner, Repo: repoName, PRNumber: pr.GetNumber(),
 		Status: "received", Payload: body, ReceivedAt: time.Now(),
 	})
-	return u.enqueueReview(ctx, r, nil)
+	return u.enqueueReview(ctx, r, nil, rc)
 }
 
 func (u *WebhookUsecase) handlePullRequestReviewComment(ctx context.Context, deliveryID string, body []byte) (domain.Review, error) {
@@ -655,27 +803,31 @@ func (u *WebhookUsecase) handlePullRequestReviewComment(ctx context.Context, del
 	ownerRepo := strings.SplitN(repo.GetFullName(), "/", 2)
 	owner, repoName := ownerRepo[0], ownerRepo[1]
 	instID := rcEvent.GetInstallation().GetID()
+	rc := u.repoConfig(ctx, owner, repoName, instID)
 
 	if pr.GetDraft() {
 		return domain.Review{}, nil
 	}
 
 	r := domain.Review{
-		DeliveryID:     deliveryID,
-		Owner:          owner,
-		Repo:           repoName,
-		PRNumber:       pr.GetNumber(),
-		HeadSHA:        pr.GetHead().GetSHA(),
-		BaseSHA:        pr.GetBase().GetSHA(),
-		InstallationID: instID,
-		Author:         pr.GetUser().GetLogin(),
-		Title:          pr.GetTitle(),
-		Body:           pr.GetBody(),
-		TriggerComment: comment.GetBody(),
-		EnqueuedAt:     time.Now(),
+		DeliveryID:         deliveryID,
+		Owner:              owner,
+		Repo:               repoName,
+		PRNumber:           pr.GetNumber(),
+		HeadSHA:            pr.GetHead().GetSHA(),
+		BaseSHA:            pr.GetBase().GetSHA(),
+		InstallationID:     instID,
+		Author:             pr.GetUser().GetLogin(),
+		Title:              pr.GetTitle(),
+		Body:               pr.GetBody(),
+		TriggerComment:     comment.GetBody(),
+		TriggerAuthor:      comment.GetUser().GetLogin(),
+		TriggerAssociation: comment.GetAuthorAssociation(),
+		Origin:             domain.OriginMentionKeyword,
+		PRLabels:           labelNames(pr.Labels),
+		EnqueuedAt:         time.Now(),
 	}
-
-	u.applySizeGate(ctx, &r, nil, sizeStats{
+	u.applySizeGate(ctx, &r, rc, nil, sizeStats{
 		additions:    pr.GetAdditions(),
 		deletions:    pr.GetDeletions(),
 		changedFiles: pr.GetChangedFiles(),
@@ -686,7 +838,7 @@ func (u *WebhookUsecase) handlePullRequestReviewComment(ctx context.Context, del
 		Action: action, Owner: owner, Repo: repoName, PRNumber: pr.GetNumber(),
 		Status: "received", Payload: body, ReceivedAt: time.Now(),
 	})
-	return u.enqueueReview(ctx, r, nil)
+	return u.enqueueReview(ctx, r, nil, rc)
 }
 
 func (u *WebhookUsecase) handleIssues(ctx context.Context, deliveryID string, body []byte) (domain.Review, error) {
@@ -734,26 +886,109 @@ func (u *WebhookUsecase) handleIssues(ctx context.Context, deliveryID string, bo
 	ownerRepo := strings.SplitN(repo.GetFullName(), "/", 2)
 	owner, repoName := ownerRepo[0], ownerRepo[1]
 	instID := isEvent.GetInstallation().GetID()
+	rc := u.repoConfig(ctx, owner, repoName, instID)
 
 	r := domain.Review{
-		DeliveryID:     deliveryID,
-		Owner:          owner,
-		Repo:           repoName,
-		PRNumber:       issue.GetNumber(),
-		InstallationID: instID,
-		Author:         issue.GetUser().GetLogin(),
-		Title:          issue.GetTitle(),
-		Body:           issue.GetBody(),
-		Type:           "issue",
-		EnqueuedAt:     time.Now(),
+		DeliveryID:         deliveryID,
+		Owner:              owner,
+		Repo:               repoName,
+		PRNumber:           issue.GetNumber(),
+		InstallationID:     instID,
+		Author:             issue.GetUser().GetLogin(),
+		Title:              issue.GetTitle(),
+		Body:               issue.GetBody(),
+		Type:               "issue",
+		TriggerAuthor:      issue.GetUser().GetLogin(),
+		TriggerAssociation: issue.GetAuthorAssociation(),
+		Origin:             domain.OriginMentionKeyword,
+		PRLabels:           labelNames(issue.Labels),
+		EnqueuedAt:         time.Now(),
 	}
-
 	_ = u.store.Record(ctx, &domain.WebhookEvent{
 		DeliveryID: deliveryID, EventType: "issues",
 		Action: action, Owner: owner, Repo: repoName, PRNumber: issue.GetNumber(),
 		Status: "received", Payload: body, ReceivedAt: time.Now(),
 	})
-	return u.enqueueReview(ctx, r, nil)
+	return u.enqueueReview(ctx, r, nil, rc)
+}
+
+// handleReaction records 👍/👎 (and other) reactions left on the bot's own
+// comments — the quality-feedback signal. Only counts reactions whose subject
+// comment was authored by this app (login "{bot}[bot]" or an elyoraa marker
+// in the body), so reactions on arbitrary comments don't pollute the metric.
+// Events are recorded in the audit log too, which is what replay fixtures
+// read from.
+func (u *WebhookUsecase) handleReaction(ctx context.Context, deliveryID string, body []byte) (domain.Review, error) {
+	// The reaction event's subject key varies by what was reacted to
+	// (comment, pull_request_review_comment, pull_request_review, …) — parse
+	// the shared shape instead of the typed event.
+	var ev struct {
+		Action   string `json:"action"`
+		Reaction struct {
+			Content string `json:"content"`
+			User    struct {
+				Login string `json:"login"`
+			} `json:"user"`
+		} `json:"reaction"`
+		Repository struct {
+			FullName string `json:"full_name"`
+		} `json:"repository"`
+	}
+	if err := json.Unmarshal(body, &ev); err != nil {
+		return domain.Review{}, fmt.Errorf("parse reaction: %w", err)
+	}
+	// Subject comment payloads: any of these keys may carry the reacted-on
+	// object — collect whichever author/body pairs are present.
+	var subjects []struct {
+		Body string `json:"body"`
+		User struct {
+			Login string `json:"login"`
+		} `json:"user"`
+	}
+	for _, key := range []string{"comment", "pull_request_review_comment", "pull_request_review", "issue", "discussion"} {
+		var s struct {
+			Body string `json:"body"`
+			User struct {
+				Login string `json:"login"`
+			} `json:"user"`
+		}
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal(body, &raw); err == nil {
+			if sub, ok := raw[key]; ok {
+				if json.Unmarshal(sub, &s) == nil && s.User.Login != "" {
+					subjects = append(subjects, s)
+				}
+			}
+		}
+	}
+
+	botLogin := strings.ToLower(u.cfg.BotHandle) + "[bot]"
+	botSubject := false
+	for _, s := range subjects {
+		if strings.EqualFold(s.User.Login, botLogin) || strings.Contains(s.Body, "<!-- elyoraa") {
+			botSubject = true
+			break
+		}
+	}
+
+	status := "ignored"
+	err := ""
+	if !botSubject {
+		err = "reaction not on a bot comment"
+	} else {
+		status = "received"
+		if u.metrics != nil {
+			u.metrics.IncReaction(ev.Reaction.Content, ev.Action)
+		}
+		slog.Info("reaction on bot comment",
+			"reaction", ev.Reaction.Content, "action", ev.Action,
+			"user", ev.Reaction.User.Login, "repo", ev.Repository.FullName)
+	}
+	_ = u.store.Record(ctx, &domain.WebhookEvent{
+		DeliveryID: deliveryID, EventType: "reaction", Action: ev.Action,
+		Status: status, Error: err, Payload: body, ReceivedAt: time.Now(),
+	})
+	return domain.Review{}, nil
 }
 
 // ErrJobNotFound is returned when a job key has no tracked record.

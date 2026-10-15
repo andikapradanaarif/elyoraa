@@ -119,6 +119,8 @@ func TestCalibratedLinesPerMinute(t *testing.T) {
 		return queue.JobRecord{
 			Status:          status,
 			Type:            typ,
+			Owner:           "o",
+			Repo:            "r",
 			DurationSeconds: secs,
 			StartedAt:       &st,
 			FinishedAt:      &doneAt,
@@ -127,16 +129,16 @@ func TestCalibratedLinesPerMinute(t *testing.T) {
 	}
 
 	// No history → fallback.
-	if got := calibratedLinesPerMinute(nil, 100); got != 100 {
+	if got := calibratedLinesPerMinute(nil, 100, "o", "r"); got != 100 {
 		t.Fatalf("empty history should use fallback, got %d", got)
 	}
-	if got := calibratedLinesPerMinute(nil, 0); got != 100 {
+	if got := calibratedLinesPerMinute(nil, 0, "o", "r"); got != 100 {
 		t.Fatalf("empty history with zero fallback should use default, got %d", got)
 	}
 
 	// Fewer than calibrationMinJobs samples → fallback even with data.
 	few := []queue.JobRecord{rec(1000, 600, queue.JobStatusCompleted, "")}
-	if got := calibratedLinesPerMinute(few, 100); got != 100 {
+	if got := calibratedLinesPerMinute(few, 100, "o", "r"); got != 100 {
 		t.Fatalf("too few samples should use fallback, got %d", got)
 	}
 
@@ -145,7 +147,7 @@ func TestCalibratedLinesPerMinute(t *testing.T) {
 	for i := 0; i < 6; i++ {
 		recs = append(recs, rec(1000, 600, queue.JobStatusCompleted, ""))
 	}
-	if got := calibratedLinesPerMinute(recs, 5); got != 100 {
+	if got := calibratedLinesPerMinute(recs, 5, "o", "r"); got != 100 {
 		t.Fatalf("calibrated rate = %d, want 100", got)
 	}
 
@@ -154,7 +156,7 @@ func TestCalibratedLinesPerMinute(t *testing.T) {
 	for i := 0; i < 6; i++ {
 		recs = append(recs, rec(1000, 1200, queue.JobStatusCompleted, ""))
 	}
-	if got := calibratedLinesPerMinute(recs, 100); got != 50 {
+	if got := calibratedLinesPerMinute(recs, 100, "o", "r"); got != 50 {
 		t.Fatalf("calibrated rate = %d, want 50", got)
 	}
 
@@ -169,7 +171,7 @@ func TestCalibratedLinesPerMinute(t *testing.T) {
 		rec(9000, 30, queue.JobStatusFailed, ""),
 		rec(0, 600, queue.JobStatusCompleted, ""),
 	)
-	if got := calibratedLinesPerMinute(recs, 5); got != 100 {
+	if got := calibratedLinesPerMinute(recs, 5, "o", "r"); got != 100 {
 		t.Fatalf("noise should be filtered, got %d", got)
 	}
 
@@ -178,8 +180,63 @@ func TestCalibratedLinesPerMinute(t *testing.T) {
 	for i := 0; i < 6; i++ {
 		recs = append(recs, rec(100000, 1, queue.JobStatusCompleted, ""))
 	}
-	if got := calibratedLinesPerMinute(recs, 100); got != calibrationMaxRate {
+	if got := calibratedLinesPerMinute(recs, 100, "o", "r"); got != calibrationMaxRate {
 		t.Fatalf("should clamp to %d, got %d", calibrationMaxRate, got)
+	}
+}
+
+// The rate is per-repository: a codegen-heavy repo shouldn't skew a normal
+// repo's estimate. With too few local samples the global pool is the fallback.
+func TestCalibratedLinesPerMinute_PerRepo(t *testing.T) {
+	doneAt := time.Now()
+	rec := func(owner, repo string, lines int, secs int64) queue.JobRecord {
+		st := doneAt.Add(-time.Duration(secs) * time.Second)
+		return queue.JobRecord{
+			Status: queue.JobStatusCompleted, Type: "review",
+			Owner: owner, Repo: repo,
+			DurationSeconds: secs, StartedAt: &st, FinishedAt: &doneAt,
+			Job: domain.Review{SizeLines: lines},
+		}
+	}
+
+	var recs []queue.JobRecord
+	for i := 0; i < 6; i++ {
+		recs = append(recs, rec("o", "gen-repo", 100000, 60)) // codegen repo: ~1667 lpm → clamps at 400
+	}
+	for i := 0; i < 6; i++ {
+		recs = append(recs, rec("o", "app-repo", 1000, 1200)) // normal repo: 50 lpm
+	}
+
+	if got := calibratedLinesPerMinute(recs, 100, "o", "app-repo"); got != 50 {
+		t.Fatalf("app-repo rate should be 50 lpm, got %d", got)
+	}
+	if got := calibratedLinesPerMinute(recs, 100, "o", "gen-repo"); got != calibrationMaxRate {
+		t.Fatalf("gen-repo rate should clamp to %d, got %d", calibrationMaxRate, got)
+	}
+	// An unseen repo falls back to the global pool (median of all samples).
+	if got := calibratedLinesPerMinute(recs, 100, "o", "new-repo"); got == 0 {
+		t.Fatal("unseen repo should fall back to the global pool")
+	}
+}
+
+// AttemptSeconds — the final successful attempt — is preferred over
+// pickup→finish duration so retry backoff doesn't depress the rate.
+func TestCalibratedLinesPerMinute_AttemptPreferred(t *testing.T) {
+	doneAt := time.Now()
+	var recs []queue.JobRecord
+	for i := 0; i < 6; i++ {
+		st := doneAt.Add(-30 * time.Minute)
+		recs = append(recs, queue.JobRecord{
+			Status: queue.JobStatusCompleted, Type: "review", Owner: "o", Repo: "r",
+			DurationSeconds: 1800, // 30 min wall incl. retry backoff
+			AttemptSeconds:  600,  // the successful attempt took 10 min
+			StartedAt:       &st, FinishedAt: &doneAt,
+			Job: domain.Review{SizeLines: 1000},
+		})
+	}
+	// 1000 lines / 10min attempt = 100 lpm — not 1000/30 = 33.
+	if got := calibratedLinesPerMinute(recs, 100, "o", "r"); got != 100 {
+		t.Fatalf("should calibrate on attempt time (100), got %d", got)
 	}
 }
 
@@ -191,7 +248,7 @@ func TestRefinedEstimate(t *testing.T) {
 		{Path: "a.go", Additions: 100, Deletions: 100}, // real: 200 lines
 		{Path: "go.sum", Additions: 900, Deletions: 900},
 	}}
-	s := refinedEstimate(info, j, 100)
+	s := refinedEstimate(info, j, 100, nil)
 	// 20min * 200/2000 = 2min — generated lines dominated the raw count.
 	if s.EstMinutes != 2 {
 		t.Fatalf("refined EstMinutes = %d, want 2", s.EstMinutes)
@@ -202,9 +259,58 @@ func TestRefinedEstimate(t *testing.T) {
 
 	// No enqueue stats → keep the fallback-rate estimate.
 	j2 := &domain.Review{}
-	s = refinedEstimate(info, j2, 100)
+	s = refinedEstimate(info, j2, 100, nil)
 	if s.EstMinutes != 2 {
 		t.Fatalf("fallback EstMinutes = %d, want 2", s.EstMinutes)
+	}
+}
+
+// The repo's .gitattributes linguist marks join the path heuristics when the
+// worktree is readable — generated files the markers miss are still excluded.
+func TestGitattributesGenerated(t *testing.T) {
+	attrs := `
+# comment
+*.pb.go linguist-generated
+contract/openapi.yaml linguist-generated=true
+web/dist/** linguist-vendored
+**/fixtures/** linguist-generated
+docs/* linguist-documentation
+`
+	m := gitattrMatcher([]byte(attrs))
+	if m == nil {
+		t.Fatal("expected a matcher")
+	}
+	for _, p := range []string{
+		"api.pb.go",
+		"pkg/api.pb.go",
+		"contract/openapi.yaml",
+		"web/dist/app.js",
+		"web/dist/sub/app.js",
+		"test/fixtures/big.json",
+		"a/b/fixtures/deep/x.json",
+	} {
+		if !m(p) {
+			t.Fatalf("%q should match linguist patterns", p)
+		}
+	}
+	for _, p := range []string{"main.go", "docs/guide.md", "web/src/app.js", "contract/api.yaml"} {
+		if m(p) {
+			t.Fatalf("%q must not match", p)
+		}
+	}
+
+	// The matcher combines with the built-in heuristics in estimation.
+	info := &github.PRInfo{Files: []*github.FileInfo{
+		{Path: "main.go", Additions: 100, Deletions: 0},
+		{Path: "contract/openapi.yaml", Additions: 5000, Deletions: 0},
+	}}
+	s := estimatePRSizeWith(info, 100, m)
+	if s.GeneratedFiles != 1 || s.Additions != 100 {
+		t.Fatalf("gitattributes-marked file not excluded: %+v", s)
+	}
+
+	if gitattrMatcher([]byte("*.go\n")) != nil {
+		t.Fatal("no linguist marks → nil matcher")
 	}
 }
 

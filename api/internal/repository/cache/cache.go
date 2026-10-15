@@ -19,7 +19,8 @@ import (
 )
 
 // ErrRepoNotCloned is returned when the bare clone for a repository does not
-// exist on disk. Repositories must be pre-cloned at {base}/{owner}/{repo}.git.
+// exist on disk and could not be created — typically because the GitHub App
+// is not installed on it or it does not exist.
 var ErrRepoNotCloned = errors.New("repository not cloned on server")
 
 // Cache manages bare clones and per-review worktrees.
@@ -27,16 +28,23 @@ type Cache struct {
 	base        string
 	askpassPath string
 	tokenDir    string
+	gitBaseURL  string // scheme://host prefix for clone URLs
 	mu          sync.Mutex
 	sf          singleflight.Group
 }
 
 // New creates a cache rooted at base using the given GIT_ASKPASS script.
-func New(base, askpassPath, tokenDir string) *Cache {
+// gitBaseURL prefixes clone URLs ("https://github.com"); empty defaults to
+// github.com. file:// bases are useful in tests.
+func New(base, askpassPath, tokenDir, gitBaseURL string) *Cache {
+	if gitBaseURL == "" {
+		gitBaseURL = "https://github.com"
+	}
 	return &Cache{
 		base:        base,
 		askpassPath: askpassPath,
 		tokenDir:    tokenDir,
+		gitBaseURL:  strings.TrimSuffix(gitBaseURL, "/"),
 	}
 }
 
@@ -113,13 +121,25 @@ func (c *Cache) AddWorktree(ctx context.Context, owner, repo string, prNumber in
 	return worktreePath, cleanup, nil
 }
 
-// Sweep removes orphaned worktrees older than ttl.
+// Sweep removes orphaned worktrees and interrupted clone temp dirs older
+// than ttl.
 func (c *Cache) Sweep(ctx context.Context, ttl time.Duration) error {
 	return filepath.Walk(c.base, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil
 		}
-		if info.IsDir() && strings.HasPrefix(info.Name(), "wt-") {
+		if !info.IsDir() {
+			return nil
+		}
+		if strings.HasSuffix(info.Name(), ".tmp-clone") {
+			// A clone temp dir abandoned by a crash — the next EnsureBareClone
+			// would remove it anyway; sweep just bounds the window.
+			if time.Since(info.ModTime()) >= ttl {
+				_ = os.RemoveAll(path)
+			}
+			return nil
+		}
+		if strings.HasPrefix(info.Name(), "wt-") {
 			if time.Since(info.ModTime()) < ttl {
 				return nil
 			}
@@ -198,12 +218,56 @@ func (c *Cache) ensureBareCloneOnce(ctx context.Context, owner, repo, token stri
 		return err
 	}
 
-	// Repositories must be pre-cloned on the server. We do not clone on demand.
-	// To register a repo for review, run on the server:
-	//   git clone --bare https://github.com/{owner}/{repo}.git {WORKSPACE_BASE}/{owner}/{repo}.git
-	//   git -C {WORKSPACE_BASE}/{owner}/{repo}.git config --local --add \
-	//     remote.origin.fetch "+refs/pull/*/head:refs/remotes/origin/pr/*"
-	return ErrRepoNotCloned
+	// Clone on demand into a temp dir, then rename — a killed or failed clone
+	// never leaves a half repo at the canonical path (IsCloned checks the dir
+	// exists). Concurrent clones of the same repo share one attempt via the
+	// singleflight in EnsureBareClone.
+	tmp := bare + ".tmp-clone"
+	_ = os.RemoveAll(tmp)
+
+	tokenFile, cleanup, err := c.writeToken(token)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	// The persisted fetch refspec covers branches and PR head refs, so plain
+	// `git fetch` keeps both current (mirrors what the manual pre-clone docs
+	// recommended).
+	// clone writes the default +refs/heads/* refspec itself; the -c adds PR
+	// head refs on top (a second heads refspec would double-map every branch
+	// and abort the initial fetch).
+	cmd := exec.CommandContext(ctx, "git", "clone", "--bare",
+		"-c", "remote.origin.fetch=+refs/pull/*/head:refs/remotes/origin/pr/*",
+		c.gitBaseURL+"/"+owner+"/"+repo+".git", tmp)
+	cmd.Env = c.gitEnv(tokenFile)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		_ = os.RemoveAll(tmp)
+		return fmt.Errorf("%w: clone failed: %v\n%s", ErrRepoNotCloned, err, out)
+	}
+	if err := os.Rename(tmp, bare); err != nil {
+		_ = os.RemoveAll(tmp)
+		return fmt.Errorf("install clone: %w", err)
+	}
+	return nil
+}
+
+// ReadRepoFile returns a file's contents from the bare clone's default branch
+// (HEAD). Used for repo-level config like .elyoraa.yml — always the default
+// branch, never a PR head, so untrusted pushes can't change their own
+// treatment. Returns an error when the repo isn't cloned or the file is
+// absent.
+func (c *Cache) ReadRepoFile(ctx context.Context, owner, repo, name string) ([]byte, error) {
+	if !c.IsCloned(owner, repo) {
+		return nil, ErrRepoNotCloned
+	}
+	cmd := exec.CommandContext(ctx, "git", "-C", c.barePath(owner, repo),
+		"show", "HEAD:"+name)
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", name, err)
+	}
+	return out, nil
 }
 
 func (c *Cache) removeWorktree(worktreePath, bare string) {

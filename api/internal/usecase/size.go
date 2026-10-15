@@ -1,6 +1,7 @@
 package usecase
 
 import (
+	"path"
 	"sort"
 	"strings"
 
@@ -24,13 +25,19 @@ type prSize struct {
 // estimatePRSize computes review-effort stats from the fetched PR info.
 // linesPerMin <= 0 falls back to a sane default.
 func estimatePRSize(info *github.PRInfo, linesPerMin int) prSize {
+	return estimatePRSizeWith(info, linesPerMin, nil)
+}
+
+// estimatePRSizeWith additionally honors a repo-level generated matcher —
+// the .gitattributes linguist flags — when the caller has the worktree.
+func estimatePRSizeWith(info *github.PRInfo, linesPerMin int, gen func(string) bool) prSize {
 	if linesPerMin <= 0 {
 		linesPerMin = 100
 	}
 	s := prSize{Files: len(info.Files), Truncated: info.FilesTruncated}
 	lines := 0
 	for _, f := range info.Files {
-		if isGeneratedPath(f.Path) {
+		if isGeneratedPath(f.Path) || (gen != nil && gen(f.Path)) {
 			s.GeneratedFiles++
 			continue
 		}
@@ -75,8 +82,8 @@ func estimateFromCounts(additions, deletions, changedFiles, linesPerMin, maxFile
 // Since enqueueEst = enqueueLines/rate, multiplying by refined/enqueued
 // yields refined/rate — the same estimate expressed in the enqueue-time
 // rate's units, with no need to plumb the rate into the worker.
-func refinedEstimate(info *github.PRInfo, j *domain.Review, fallbackLinesPerMin int) prSize {
-	s := estimatePRSize(info, fallbackLinesPerMin)
+func refinedEstimate(info *github.PRInfo, j *domain.Review, fallbackLinesPerMin int, gen func(string) bool) prSize {
+	s := estimatePRSizeWith(info, fallbackLinesPerMin, gen)
 	lines := s.Additions + s.Deletions
 	if j.SizeLines > 0 && j.SizeEstMinutes > 0 {
 		s.EstMinutes = (j.SizeEstMinutes*lines + j.SizeLines - 1) / j.SizeLines
@@ -95,35 +102,135 @@ const (
 // calibratedLinesPerMinute derives the lines-per-minute rate from observed
 // durations of recently completed review jobs, so PR_REVIEW_BUDGET_MINUTES
 // tracks real execution time on this deployment rather than a guessed
-// constant. Job records are most-recently-updated first. Returns fallback
-// until enough samples exist.
-func calibratedLinesPerMinute(records []queue.JobRecord, fallback int) int {
+// constant. Job records are most-recently-updated first.
+//
+// The rate is calibrated per repository first — codegen-heavy repos skew a
+// shared median — falling back to the global pool, then to the configured
+// fallback, when there aren't enough samples.
+func calibratedLinesPerMinute(records []queue.JobRecord, fallback int, owner, repo string) int {
+	if r, ok := medianRate(records, func(rec *queue.JobRecord) bool {
+		return rec.Owner == owner && rec.Repo == repo
+	}); ok {
+		return r
+	}
+	if r, ok := medianRate(records, nil); ok {
+		return r
+	}
+	if fallback <= 0 {
+		fallback = 100
+	}
+	return fallback
+}
+
+// medianRate samples the lines-per-minute of completed review jobs matching
+// filter (nil = all). It prefers AttemptSeconds — the final successful
+// attempt's duration — over pickup→finish wall time, which includes retry
+// backoff and queue-adjacent GitHub calls.
+func medianRate(records []queue.JobRecord, filter func(*queue.JobRecord) bool) (int, bool) {
 	rates := make([]int, 0, calibrationWindow)
-	for _, rec := range records {
+	for i := range records {
+		rec := &records[i]
 		if len(rates) >= calibrationWindow {
 			break
 		}
-		// Only completed full reviews calibrate the rate: split/issue jobs
-		// have a different cost profile and failed/cancelled runs skew it.
-		if rec.Status != queue.JobStatusCompleted ||
-			(rec.Type != "" && rec.Type != "review") ||
-			rec.DurationSeconds <= 0 ||
-			rec.Job.SizeLines <= 0 {
+		if filter != nil && !filter(rec) {
 			continue
 		}
-		if rate := int(float64(rec.Job.SizeLines) / (float64(rec.DurationSeconds) / 60)); rate > 0 {
+		// Only completed full reviews calibrate the rate: split/issue/gate
+		// jobs have a different cost profile and failed runs skew it.
+		lines := rec.Job.SizeLines
+		if rec.RefinedLines > 0 {
+			lines = rec.RefinedLines
+		}
+		seconds := rec.DurationSeconds
+		if rec.AttemptSeconds > 0 {
+			seconds = rec.AttemptSeconds
+		}
+		if rec.Status != queue.JobStatusCompleted ||
+			(rec.Type != "" && rec.Type != "review") ||
+			seconds <= 0 || lines <= 0 {
+			continue
+		}
+		if rate := int(float64(lines) / (float64(seconds) / 60)); rate > 0 {
 			rates = append(rates, rate)
 		}
 	}
 	if len(rates) < calibrationMinJobs {
-		if fallback <= 0 {
-			fallback = 100
-		}
-		return fallback
+		return 0, false
 	}
 	sort.Ints(rates)
 	med := rates[len(rates)/2]
-	return min(max(med, calibrationMinRate), calibrationMaxRate)
+	return min(max(med, calibrationMinRate), calibrationMaxRate), true
+}
+
+// gitattrMatcher parses a repo's .gitattributes for linguist-generated /
+// linguist-vendored marks — GitHub's own classification signal. It catches
+// generated code the path heuristics miss (e.g. contract/openapi.yaml).
+// Returns nil when no marks exist.
+func gitattrMatcher(data []byte) func(string) bool {
+	var patterns []string
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		for _, attr := range fields[1:] {
+			name := strings.TrimPrefix(attr, "-")
+			name = strings.SplitN(name, "=", 2)[0]
+			if name == "linguist-generated" || name == "linguist-vendored" {
+				patterns = append(patterns, strings.TrimPrefix(fields[0], "/"))
+				break
+			}
+		}
+	}
+	if len(patterns) == 0 {
+		return nil
+	}
+	return func(p string) bool {
+		for _, pat := range patterns {
+			if gitattrMatch(pat, p) {
+				return true
+			}
+		}
+		return false
+	}
+}
+
+// gitattrMatch matches a .gitattributes pattern (gitignore-style globs) to a
+// repo-relative path. Patterns without a slash match any basename; patterns
+// with a slash match the full path, where `**` spans zero or more segments.
+func gitattrMatch(pattern, p string) bool {
+	if !strings.Contains(pattern, "/") {
+		ok, _ := path.Match(pattern, path.Base(p))
+		return ok
+	}
+	return matchSegments(strings.Split(pattern, "/"), strings.Split(p, "/"))
+}
+
+func matchSegments(pat, segs []string) bool {
+	if len(pat) == 0 {
+		return len(segs) == 0
+	}
+	if pat[0] == "**" {
+		for i := 0; i <= len(segs); i++ {
+			if matchSegments(pat[1:], segs[i:]) {
+				return true
+			}
+		}
+		return false
+	}
+	if len(segs) == 0 {
+		return false
+	}
+	ok, err := path.Match(pat[0], segs[0])
+	if err != nil || !ok {
+		return false
+	}
+	return matchSegments(pat[1:], segs[1:])
 }
 
 // generatedPathMarkers are path fragments that mark files as generated or

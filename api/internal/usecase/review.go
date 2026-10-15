@@ -127,9 +127,8 @@ func (r *ReviewUsecase) Process(ctx context.Context, j domain.Review) (attempts 
 	if err := r.cache.Fetch(ctx, j.Owner, j.Repo, token); err != nil {
 		if errors.Is(err, cache.ErrRepoNotCloned) {
 			r.updatePending(ctx, &j, fmt.Sprintf(
-				"Review skipped: repository `%s/%s` is not cloned on this server. "+
-					"Clone it first at `%s/%s/%s.git`.",
-				j.Owner, j.Repo, r.cfg.WorkspaceBase, j.Owner, j.Repo,
+				"Review skipped: could not clone `%s/%s` — is the GitHub App installed on this repository?",
+				j.Owner, j.Repo,
 			))
 			r.markStatus(ctx, j, "skipped")
 			return attempts, nil
@@ -160,14 +159,41 @@ func (r *ReviewUsecase) Process(ctx context.Context, j domain.Review) (attempts 
 		return attempts, nil
 	}
 
+	// Record the refined (generated-excluded) line count on the job record so
+	// rate calibration isn't fed by webhook counters that include generated
+	// files — the enqueue-time counters can't see paths, only this per-file
+	// fetch can. Skipped when the file list is truncated: the partial list
+	// undercounts, so the payload estimate is the better number.
+	// Generated-file detection upgrades to the repo's own signal when the
+	// worktree is available: .gitattributes linguist-generated/vendored marks
+	// catch generated files the path heuristics miss.
+	gen := isGeneratedPath
+	if len(j.IgnoredPaths) > 0 {
+		ignored := j.IgnoredPaths
+		base := gen
+		gen = func(p string) bool { return base(p) || ignoredPath(ignored, p) }
+	}
+	if data, err := os.ReadFile(filepath.Join(worktree, ".gitattributes")); err == nil {
+		if m := gitattrMatcher(data); m != nil {
+			prev := gen
+			gen = func(p string) bool { return prev(p) || m(p) }
+		}
+	}
+
+	if r.tracker != nil && j.SizeLines > 0 && !prInfo.FilesTruncated {
+		if s := estimatePRSizeWith(prInfo, r.cfg.PRLinesPerMinute, gen); s.Additions+s.Deletions > 0 && s.Additions+s.Deletions != j.SizeLines {
+			r.tracker.Annotate(ctx, j.JobKey, queue.JobAnnotation{RefinedLines: s.Additions + s.Deletions})
+		}
+	}
+
 	// Split jobs were gated at enqueue from webhook counters, which include
 	// generated files. Re-verify with per-file stats: if the refined estimate
 	// fits the budget, run the normal review after all. The inverse never
 	// happens — per-file estimation only removes lines, so a job enqueued as
 	// a review can't secretly be oversize.
 	if j.IsSplit() {
-		size := refinedEstimate(prInfo, &j, r.cfg.PRLinesPerMinute)
-		if size.tooBig(r.cfg.PRReviewBudgetMinutes) {
+		size := refinedEstimate(prInfo, &j, r.cfg.PRLinesPerMinute, gen)
+		if size.tooBig(jobBudget(r.cfg, j)) {
 			return r.processOversize(ctx, &j, worktree, prInfo, size)
 		}
 		slog.Info("split job demoted to review: refined estimate under budget",
@@ -326,14 +352,14 @@ func (r *ReviewUsecase) markFailed(ctx context.Context, j domain.Review, msg str
 // from the issue text alone and mentions that the repo isn't available.
 func (r *ReviewUsecase) processIssue(ctx context.Context, j *domain.Review) (attempts int, err error) {
 	attempts = 1
-	pendingBody := "Analyzing issue…\n\n<!-- elyoraa-in-progress -->"
+	body := pendingBody(j, jobBudget(r.cfg, *j))
 	if j.PendingCommentID != 0 {
 		editCtx, cancel := context.WithTimeout(context.Background(), r.cfg.CommentTimeout)
-		_ = r.gh.EditComment(editCtx, j.InstallationID, j.Owner, j.Repo, j.PendingCommentID, pendingBody)
+		_ = r.gh.EditComment(editCtx, j.InstallationID, j.Owner, j.Repo, j.PendingCommentID, body)
 		cancel()
 	} else {
 		pendingCtx, cancel := context.WithTimeout(context.Background(), r.cfg.CommentTimeout)
-		commentID, err := r.gh.PostPendingComment(pendingCtx, j.InstallationID, j.Owner, j.Repo, j.PRNumber, pendingBody)
+		commentID, err := r.gh.PostPendingComment(pendingCtx, j.InstallationID, j.Owner, j.Repo, j.PRNumber, body)
 		cancel()
 		if err != nil {
 			slog.Warn("failed to post pending comment", "error", err)
@@ -564,7 +590,7 @@ func (r *ReviewUsecase) processOversize(ctx context.Context, j *domain.Review, w
 	slog.Info("oversize PR: skipping full review for split proposal",
 		"job", j.JobKey, "files", size.Files, "additions", size.Additions,
 		"deletions", size.Deletions, "generated_files", size.GeneratedFiles,
-		"est_minutes", size.EstMinutes, "budget_minutes", r.cfg.PRReviewBudgetMinutes,
+		"est_minutes", size.EstMinutes, "budget_minutes", jobBudget(r.cfg, *j),
 		"truncated", size.Truncated, "create_mode", j.SplitCreate)
 
 	// PR conversation thread — in create mode the bot's earlier proposal and
@@ -645,7 +671,7 @@ func (r *ReviewUsecase) renderSplitPrompt(j *domain.Review, prInfo *github.PRInf
 		"BotHandle":      r.cfg.BotHandle,
 		"TriggerComment": j.TriggerComment,
 		"Size":           size,
-		"BudgetMinutes":  r.cfg.PRReviewBudgetMinutes,
+		"BudgetMinutes":  jobBudget(r.cfg, *j),
 		"CreateMode":     createMode,
 		"PatchText":      prInfo.PatchText,
 		"PatchTooBig":    prInfo.PatchTooBig,
