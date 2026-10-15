@@ -1,0 +1,29 @@
+version: 2
+
+# Minimum release age: `cooldown` holds each update until the release is old
+# enough to have been vetted by the ecosystem (blunts supply-chain attacks
+# caught and yanked in the first days).
+updates:
+  - package-ecosystem: "gomod"
+    directory: "/api"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+      semver-major-days: 14
+
+  - package-ecosystem: "docker"
+    directory: "/api/deploy"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+      semver-major-days: 14
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+      semver-major-days: 14

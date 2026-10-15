@@ -3,7 +3,15 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
+    # Deploy the registry image without building: set
+    # ELYORAA_IMAGE=ghcr.io/<owner>/elyoraa:<sha> and run
+    # `docker compose pull && docker compose up -d`. Rollback = point the
+    # variable at the previous SHA tag.
+    image: ${ELYORAA_IMAGE:-elyoraa}
     container_name: elyoraa
+    # Grace for SHUTDOWN_DRAIN_TIMEOUT plus HTTP shutdown — the default 10s
+    # would SIGKILL mid-review. Keep >= the drain timeout you configure.
+    stop_grace_period: 20m
     ports:
       - "8080:8080"
     volumes:
@@ -17,6 +25,9 @@ services:
       # Devin stores auth tokens in ~/.local/share/devin/credentials.toml
       - ${DEVIN_DATA_HOST_PATH:?DEVIN_DATA_HOST_PATH must be set in .env}:/home/elyoraa/.local/share/devin
       - devin-config:/var/lib/elyoraa/devin-config
+      # Queue + job-record persistence (QUEUE_BACKEND=file). Queued jobs and
+      # outcomes survive restarts/deploys.
+      - queue-data:/var/lib/elyoraa/queue
       # Bind the host's `devin` binary into the container.
       - ${DEVIN_BIN_HOST_PATH:-/usr/local/bin/devin}:/usr/local/bin/devin:ro
     env_file: .env
@@ -29,8 +40,29 @@ services:
     security_opt:
       - "seccomp:unconfined"
 
+  # Optional Postgres for QUEUE_BACKEND=postgres (multi-replica / HA mode).
+  # Enable with: docker compose --profile db up -d
+  # and set DATABASE_URL=postgres://elyoraa:${POSTGRES_PASSWORD:-changeme}@db:5432/elyoraa
+  # in .env. For production you probably want a managed Postgres instead.
+  db:
+    profiles: ["db"]
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: elyoraa
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      POSTGRES_DB: elyoraa
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U elyoraa -d elyoraa"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
 volumes:
   devin-config:
+  queue-data:
+  pg-data:
 
 secrets:
   github-app-private-key:

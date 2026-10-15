@@ -1,5 +1,5 @@
-# Build stage
-FROM golang:1.27-alpine AS builder
+# Build stage — keep in sync with the `go` directive in api/go.mod.
+FROM golang:1.25-alpine AS builder
 RUN apk add --no-cache git ca-certificates
 WORKDIR /build
 COPY go.mod go.sum ./
@@ -33,8 +33,8 @@ RUN mkdir -p /home/elyoraa/.config/devin/skills/pr-review
 COPY deploy/skills/pr-review/SKILL.md /home/elyoraa/.config/devin/skills/pr-review/SKILL.md
 RUN chown -R elyoraa:elyoraa /home/elyoraa
 
-# Pre-create workspace, token, devin-config, and tmp dirs.
-RUN mkdir -p /var/lib/elyoraa/workspace /var/lib/elyoraa/tokens /var/lib/elyoraa/devin-config /tmp/elyoraa && \
+# Pre-create workspace, token, devin-config, queue, and tmp dirs.
+RUN mkdir -p /var/lib/elyoraa/workspace /var/lib/elyoraa/tokens /var/lib/elyoraa/devin-config /var/lib/elyoraa/queue /tmp/elyoraa && \
     chown -R elyoraa:elyoraa /var/lib/elyoraa /tmp/elyoraa
 
 USER elyoraa
