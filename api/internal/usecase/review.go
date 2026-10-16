@@ -514,6 +514,7 @@ func (r *ReviewUsecase) renderIssuePrompt(j *domain.Review, thread []Conversatio
 		"TriggerComment": j.TriggerComment,
 		"BotHandle":      r.cfg.BotHandle,
 		"RepoAvailable":  j.RepoAvailable,
+		"SyncCmd":        r.syncCmd(),
 		"Thread":         thread,
 	}
 
@@ -709,6 +710,7 @@ func (r *ReviewUsecase) renderSplitPrompt(j *domain.Review, prInfo *github.PRInf
 		"BaseSHA":        j.BaseSHA,
 		"BotHandle":      r.cfg.BotHandle,
 		"TriggerComment": j.TriggerComment,
+		"SyncCmd":        r.syncCmd(),
 		"Size":           size,
 		"BudgetMinutes":  jobBudget(r.cfg, *j),
 		"CreateMode":     createMode,
@@ -812,6 +814,7 @@ func (r *ReviewUsecase) renderPrompt(j *domain.Review, prInfo *github.PRInfo) (s
 		"PatchText":   prInfo.PatchText,
 		"PatchTooBig": prInfo.PatchTooBig,
 		"Files":       prInfo.Files,
+		"SyncCmd":     r.syncCmd(),
 	}
 
 	var buf bytes.Buffer
@@ -847,6 +850,22 @@ func (r *ReviewUsecase) runDevin(ctx context.Context, j *domain.Review, worktree
 	promptFile := filepath.Join(tmpDir, "prompt.md")
 	if err := os.WriteFile(promptFile, []byte(prompt), 0o644); err != nil {
 		return "", 0, 0, err
+	}
+
+	// Credentials for agent-run git: the token file lives in the deny-listed
+	// token dir so sandboxed commands cannot read it — only the excluded
+	// repo-sync helper consumes it (via the host-locked askpass). Best-effort:
+	// a token failure must not block the run itself.
+	tokenFile := ""
+	if r.gh != nil && r.cache != nil {
+		if tok, terr := r.gh.InstallationToken(ctx, j.InstallationID); terr != nil {
+			slog.Warn("devin run without git credentials: token mint failed", "job", j.JobKey, "error", terr)
+		} else if tf, cleanupToken, werr := r.cache.WriteTokenFile(tok); werr != nil {
+			slog.Warn("devin run without git credentials: token file", "job", j.JobKey, "error", werr)
+		} else {
+			tokenFile = tf
+			defer cleanupToken()
+		}
 	}
 
 	model := r.jobModel(j)
@@ -891,7 +910,7 @@ func (r *ReviewUsecase) runDevin(ctx context.Context, j *domain.Review, worktree
 		}
 		if runErr == nil {
 			log.Info("devin run started")
-			out, runErr = r.execDevin(attemptCtx, worktree, args, tmpDir)
+			out, runErr = r.execDevin(attemptCtx, worktree, args, tmpDir, tokenFile)
 			switch {
 			case runErr != nil:
 				transient, reason = classifyDevinError(runErr, attemptCtx, out)
@@ -947,11 +966,26 @@ func (r *ReviewUsecase) devinPreflight(ctx context.Context, worktree, model stri
 }
 
 // execDevin runs the devin subprocess once and returns its combined output.
-func (r *ReviewUsecase) execDevin(ctx context.Context, worktree string, args []string, tmpDir string) (string, error) {
+// The environment carries the git credential plumbing the agent-side
+// repo-sync helper consumes — the token file itself is deny-hidden inside
+// the sandbox, and GIT_TERMINAL_PROMPT=0 turns any sandboxed credentialed
+// git operation (which cannot succeed) into a fast failure instead of a
+// blocked prompt.
+func (r *ReviewUsecase) execDevin(ctx context.Context, worktree string, args []string, tmpDir, tokenFile string) (string, error) {
 	cmd := exec.CommandContext(ctx, r.cfg.DevinBin, args...)
 	cmd.Dir = worktree
 	env := os.Environ()
-	env = append(env, "XDG_CACHE_HOME="+tmpDir, "TMPDIR="+tmpDir)
+	env = append(env,
+		"XDG_CACHE_HOME="+tmpDir,
+		"TMPDIR="+tmpDir,
+		"GIT_TERMINAL_PROMPT=0",
+		"GIT_ASKPASS="+r.cfg.GitAskpassPath,
+		"ELYORAA_GIT_HOST="+cache.GitHost(r.cfg.GitBaseURL),
+		"ELYORAA_WORKSPACE_BASE="+r.cfg.WorkspaceBase,
+	)
+	if tokenFile != "" {
+		env = append(env, "ELYORAA_GIT_TOKEN_FILE="+tokenFile)
+	}
 	cmd.Env = env
 
 	out, err := cmd.CombinedOutput()
@@ -1309,6 +1343,7 @@ func (r *ReviewUsecase) renderReconcilePrompt(j *domain.Review, prev *github.Pre
 		"HeadSHA":       j.HeadSHA,
 		"Findings":      prev.Findings,
 		"FreshComments": review.Comments,
+		"SyncCmd":       r.syncCmd(),
 	}
 
 	var buf bytes.Buffer
@@ -1318,18 +1353,114 @@ func (r *ReviewUsecase) renderReconcilePrompt(j *domain.Review, prev *github.Pre
 	return buf.String(), nil
 }
 
-// WriteDevinConfig writes a locked devin-config.json inside dir. It omits the
-// mem0 MCP server unless MEM0_API_KEY is set. Using a directory instead of a
-// single file path makes bind-mounts safe against atomic rename-writes.
+// syncScriptName is the generated helper the agent runs to refresh the bare
+// clone its worktree belongs to. It lives in the (deny-listed) config dir —
+// the script only needs to be executable, not readable.
+const syncScriptName = "repo-sync.sh"
+
+// repoSyncScript is the body of the generated helper. The script is the only
+// credentialed git path an agent can reach: it runs outside the Devin sandbox
+// (sandbox.excluded), fixes git's argv itself, and wipes the environment so
+// agent-controlled variables (GIT_CONFIG_PARAMETERS URL rewrites, credential
+// helpers, trace targets) cannot redirect the installation token. The
+// askpass helper additionally answers credentials only for ELYORAA_GIT_HOST.
+const repoSyncScript = `#!/bin/sh
+# elyoraa repo-sync — refresh the local clone backing a worktree.
+#
+# Usage: repo-sync.sh [worktree-path]      (defaults to the current directory)
+#
+# Runs ` + "`git -C <bare> fetch --prune origin`" + ` with the server's credentials. The
+# worktree shares the clone's object store and refs, so a synced clone is
+# visible to ` + "`git log`" + `/` + "`git show`" + `/` + "`git checkout`" + ` here immediately.
+set -eu
+
+BASE=${ELYORAA_WORKSPACE_BASE:?ELYORAA_WORKSPACE_BASE is not set}
+BASE=$(cd "$BASE" && pwd -P)
+
+# Resolve the worktree (positional arg or cwd) and require it to live under
+# the workspace.
+WT=$(cd "${1:-.}" && pwd -P)
+case "$WT" in
+  "$BASE"/*) ;;
+  *) echo "repo-sync: $WT is not inside $BASE" >&2; exit 1 ;;
+esac
+
+# Locate the shared git dir backing the worktree. PATH is pinned so no
+# agent-provided binary can shadow git here.
+COMMON=$(env -i PATH=/usr/local/bin:/usr/bin:/bin git -C "$WT" rev-parse --git-common-dir 2>/dev/null) || {
+  echo "repo-sync: $WT is not a git worktree" >&2; exit 1
+}
+case "$COMMON" in
+  /*) ;;
+  *) COMMON="$WT/$COMMON" ;;
+esac
+BARE=$(cd "$COMMON" 2>/dev/null && pwd -P) || {
+  echo "repo-sync: cannot resolve git dir $COMMON" >&2; exit 1
+}
+
+# Only managed bare clones (<base>/<owner>/<repo>.git) may be fetched — a
+# repo created deeper in the tree could carry an attacker-controlled origin.
+REL=${BARE#"$BASE"/}
+case "$REL" in
+  */*.git)
+    PARENT=${REL%/*}
+    case "$PARENT" in
+      */*) echo "repo-sync: $BARE is not a managed bare clone" >&2; exit 1 ;;
+    esac
+    ;;
+  *) echo "repo-sync: $BARE is not a managed bare clone" >&2; exit 1 ;;
+esac
+
+if env -i \
+  PATH=/usr/local/bin:/usr/bin:/bin \
+  HOME="${HOME:-/tmp}" \
+  GIT_TERMINAL_PROMPT=0 \
+  GIT_ASKPASS="${GIT_ASKPASS:?GIT_ASKPASS is not set}" \
+  ELYORAA_GIT_TOKEN_FILE="${ELYORAA_GIT_TOKEN_FILE:?ELYORAA_GIT_TOKEN_FILE is not set}" \
+  ELYORAA_GIT_HOST="${ELYORAA_GIT_HOST:?ELYORAA_GIT_HOST is not set}" \
+  git -C "$BARE" fetch --prune origin; then
+  exit 0
+fi
+
+# Fetch refuses to update a branch that is checked out in any linked
+# worktree — elyoraa's own worktrees are always detached, so a hit here means
+# the agent itself ran ` + "`git checkout <branch>`" + ` earlier.
+echo "repo-sync: fetch failed — if a branch is checked out in this worktree, run 'git switch --detach' first, then retry" >&2
+exit 1
+`
+
+// syncCmd is the agent-side path to the generated repo-sync helper.
+func (r *ReviewUsecase) syncCmd() string {
+	return filepath.Join(r.cfg.DevinConfigDir, syncScriptName)
+}
+
+// WriteDevinConfig writes a locked devin-config.json inside dir, plus the
+// repo-sync.sh helper the agent uses to refresh a worktree's clone. It omits
+// the mem0 MCP server unless MEM0_API_KEY is set. Using a directory instead
+// of a single file path makes bind-mounts safe against atomic rename-writes.
 //
 // The deny list hides credential material from the agent: Read(...) denies
 // hide paths at the OS level when --sandbox is active, and block the read tool
 // otherwise. tokenDir holds GitHub installation tokens; configDir holds this
 // config (and the mem0 API key).
+//
+// Agent git access: read-only commands and repo-local mutations (checkout,
+// switch, reset, restore, clean, worktree) are allowed — the mutations run
+// OUTSIDE the sandbox via sandbox.excluded because a worktree's git metadata
+// lives in the shared bare clone, outside the sandbox's writable workspace.
+// The credentialed path is exactly one fixed-argv script. Direct remote git
+// ops are denied outright rather than merely sandboxed: sandboxed commands
+// still inherit GIT_ASKPASS/ELYORAA_GIT_TOKEN_FILE, and while the askpass
+// host-lock keeps the token on ELYORAA_GIT_HOST, an org-scoped installation
+// token could otherwise read OTHER repos the App is installed on. Commands
+// that move shared refs or touch the credential machinery are denied too —
+// in every mode.
 func WriteDevinConfig(dir, tokenDir string) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
+
+	syncPath := filepath.Join(dir, syncScriptName)
 
 	cfg := map[string]any{
 		"permissions": map[string][]string{
@@ -1338,12 +1469,30 @@ func WriteDevinConfig(dir, tokenDir string) error {
 				"grep",
 				"glob",
 				"mcp__mem0__*",
+				"Exec(" + syncPath + ")",
 				"Exec(git diff)",
 				"Exec(git status)",
 				"Exec(git log)",
 				"Exec(git show)",
 				"Exec(git rev-parse)",
 				"Exec(git ls-files)",
+				"Exec(git ls-tree)",
+				"Exec(git for-each-ref)",
+				"Exec(git cat-file)",
+				"Exec(git blame)",
+				"Exec(git describe)",
+				"Exec(git merge-base)",
+				"Exec(git shortlog)",
+				"Exec(git name-rev)",
+				"Exec(git branch)",
+				"Exec(git tag)",
+				"Exec(git remote)",
+				"Exec(git checkout)",
+				"Exec(git switch)",
+				"Exec(git restore)",
+				"Exec(git reset)",
+				"Exec(git clean)",
+				"Exec(git worktree)",
 			},
 			"deny": {
 				"edit",
@@ -1351,6 +1500,99 @@ func WriteDevinConfig(dir, tokenDir string) error {
 				"Exec(curl)",
 				"Exec(wget)",
 				"Exec(gh)",
+				// Every git path that can reach a remote or mint fresh
+				// credentials — repo-sync is the only credentialed fetch.
+				"Exec(git push)",
+				"Exec(git fetch)",
+				"Exec(git pull)",
+				"Exec(git clone)",
+				"Exec(git ls-remote)",
+				"Exec(git submodule)",
+				"Exec(git archive)",
+				"Exec(git daemon)",
+				"Exec(git instaweb)",
+				"Exec(git svn)",
+				"Exec(git send-email)",
+				"Exec(git upload-pack)",
+				"Exec(git receive-pack)",
+				"Exec(git maintenance)",
+				// Credential machinery and remote retargeting — never, in
+				// any permission mode.
+				"Exec(git credential)",
+				"Exec(git config)",
+				"Exec(git remote add)",
+				"Exec(git remote set-url)",
+				"Exec(git remote rm)",
+				"Exec(git remote rename)",
+				"Exec(git remote update)",
+				"Exec(git remote prune)",
+				"Exec(git remote set-head)",
+				"Exec(git remote set-branches)",
+				"Exec(git update-ref)",
+				"Exec(git pack-refs)",
+				"Exec(git gc)",
+				"Exec(git prune)",
+				"Exec(git reflog expire)",
+				// Ref-creating forms of the otherwise-allowed commands —
+				// shared refs live in the bare clone and are visible to
+				// every concurrent job.
+				"Exec(git checkout -b)",
+				"Exec(git checkout -B)",
+				"Exec(git checkout -t)",
+				"Exec(git checkout --track)",
+				"Exec(git switch -c)",
+				"Exec(git switch -C)",
+				"Exec(git switch -t)",
+				"Exec(git switch --track)",
+				"Exec(git switch --create)",
+				"Exec(git switch --force-create)",
+				// Shared-ref mutation: `git branch`/`git tag` list safely, but
+				// the flag forms below delete/move/copy refs other jobs use.
+				// (Positional `git branch <name>`/`git tag <name>` still create
+				// refs — self-healing: fetch --prune removes branch refs that
+				// don't exist on origin.)
+				"Exec(git branch -d)",
+				"Exec(git branch -D)",
+				"Exec(git branch --delete)",
+				"Exec(git branch -m)",
+				"Exec(git branch -M)",
+				"Exec(git branch --move)",
+				"Exec(git branch -c)",
+				"Exec(git branch -C)",
+				"Exec(git branch --copy)",
+				"Exec(git branch -f)",
+				"Exec(git branch --force)",
+				"Exec(git branch -u)",
+				"Exec(git branch --set-upstream-to)",
+				"Exec(git branch --unset-upstream)",
+				"Exec(git tag -d)",
+				"Exec(git tag -D)",
+				"Exec(git tag --delete)",
+				"Exec(git tag -f)",
+				"Exec(git tag --force)",
+				// `git worktree` is allowed for `list` — the subcommands below
+				// create/destroy worktrees shared with other jobs.
+				"Exec(git worktree add)",
+				"Exec(git worktree remove)",
+				"Exec(git worktree move)",
+				"Exec(git worktree repair)",
+				"Exec(git worktree lock)",
+				"Exec(git worktree unlock)",
+				"Exec(git worktree prune)",
+				// Local plumbing that still writes shared refs or worktree
+				// linkage.
+				"Exec(git symbolic-ref)",
+				"Exec(git bisect)",
+				// History writers the read-only policy never needs.
+				"Exec(git commit)",
+				"Exec(git merge)",
+				"Exec(git rebase)",
+				"Exec(git cherry-pick)",
+				"Exec(git revert)",
+				"Exec(git am)",
+				"Exec(git apply)",
+				"Exec(git stash)",
+				"Exec(git replace)",
 				"Fetch(**)",
 				// Credentials and secrets the agent must never see —
 				// hidden at OS level under --sandbox.
@@ -1367,6 +1609,23 @@ func WriteDevinConfig(dir, tokenDir string) error {
 				"Read(**/id_ed25519*)",
 				"Read(**/.gitconfig)",
 				"Read(**/*.pem)",
+			},
+		},
+		"sandbox": map[string]any{
+			"excluded": map[string][]string{
+				"allow": {
+					// The only credentialed git path: env-scrubbed,
+					// fixed-argv `git -C <bare> fetch --prune origin`.
+					"Exec(" + syncPath + ")",
+					// Repo-scoped, credential-free mutations the sandbox's
+					// read-only view of the shared git dir would reject.
+					"Exec(git checkout)",
+					"Exec(git switch)",
+					"Exec(git restore)",
+					"Exec(git reset)",
+					"Exec(git clean)",
+					"Exec(git worktree)",
+				},
 			},
 		},
 	}
@@ -1387,5 +1646,8 @@ func WriteDevinConfig(dir, tokenDir string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, "devin-config.json"), b, 0o644)
+	if err := os.WriteFile(filepath.Join(dir, "devin-config.json"), b, 0o644); err != nil {
+		return err
+	}
+	return os.WriteFile(syncPath, []byte(repoSyncScript), 0o755)
 }

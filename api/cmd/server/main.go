@@ -75,7 +75,7 @@ func main() {
 		defer db.Close()
 	}
 
-	c := cache.New(cfg.WorkspaceBase, "/app/git-askpass.sh", tokenDir, cfg.GitBaseURL)
+	c := cache.New(cfg.WorkspaceBase, cfg.GitAskpassPath, tokenDir, cfg.GitBaseURL)
 	m := metrics.New()
 	store := repository.NewWebhookStore(db)
 

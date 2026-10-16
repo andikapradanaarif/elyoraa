@@ -118,6 +118,7 @@ func (r *ReviewUsecase) renderGatePrompt(j *domain.Review, prInfo *github.PRInfo
 		"BudgetMinutes": jobBudget(r.cfg, *j),
 		"Files":         prInfo.Files,
 		"Truncated":     prInfo.FilesTruncated,
+		"SyncCmd":       r.syncCmd(),
 	}
 
 	var buf bytes.Buffer

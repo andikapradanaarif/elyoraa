@@ -24,7 +24,7 @@ A new review just ran on the CURRENT code and produced these comments (the fresh
 
 For EACH previous finding:
 
-1. Trace the CURRENT code in the worktree — the diff may have moved or changed the lines. Open the files; do not guess.
+1. Trace the CURRENT code in the worktree — the diff may have moved or changed the lines. Open the files; do not guess. The worktree is a git worktree of the server's local clone; `git log`/`git show`/`git diff` work against all fetched refs, and `{{.SyncCmd}}` refreshes the clone if needed.
 2. Classify the finding:
    - `fixed` — the current code resolves it. Only mark fixed when you can point to the specific code that resolves it. Do NOT mark fixed merely because the line moved or you can no longer find the old code.
    - `still_present` — the issue is still real in the current code.

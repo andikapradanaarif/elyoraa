@@ -9,6 +9,8 @@ You are an expert code reviewer. Review the pull request described below and the
 - Head SHA: {{.HeadSHA}}
 - Base SHA: {{.BaseSHA}}
 
+Your working directory is a git worktree of the repository's local clone, checked out at the head SHA. `git` commands (`diff`, `log`, `show`, `checkout`, `reset`) work. The clone is refreshed when your session starts; if you need newer refs mid-run, run `{{.SyncCmd}}` to fetch the latest repo state and branches.
+
 {{if .PatchTooBig -}}
 The patch is too large to include in full. Here is the diffstat and the list of changed files. Use the `read`, `grep`, and `glob` tools to inspect the relevant files in the checked-out worktree.
 {{else -}}
@@ -109,7 +111,7 @@ Follow these steps in order.
      be sure nothing was missed.
 
    Do not write or edit any files. Do not run any shell commands other
-   than the allowed git commands.
+   than the allowed git commands and the repo-sync helper.
 
 7. **Save new learnings.**
    - If you discovered a new repo convention, author preference, or special case, call `mcp__mem0__add` to store 1-3 high-level, non-sensitive patterns.

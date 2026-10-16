@@ -39,7 +39,7 @@ A PR is expensive when the churn carries real logic:
 - cross-cutting refactors where correctness depends on subtle interactions,
 - anything where a missed detail would be a real bug.
 
-You may inspect the checked-out worktree (read-only): `git diff {{.BaseSHA}}...{{.HeadSHA}} -- <path>`, `git show`, `git log`, or just open files. Check `.gitattributes` for `linguist-generated`/`linguist-vendored` marks — they flag generated code the path heuristics miss. Keep it to spot checks — this is triage, not a review.
+You may inspect the checked-out worktree: `git diff {{.BaseSHA}}...{{.HeadSHA}} -- <path>`, `git show`, `git log`, or just open files. Check `.gitattributes` for `linguist-generated`/`linguist-vendored` marks — they flag generated code the path heuristics miss. The worktree is a git worktree of the server's clone — run `{{.SyncCmd}}` if you need newer refs mid-run. Keep it to spot checks — this is triage, not a review.
 
 ## Verdict
 

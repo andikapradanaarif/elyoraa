@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -23,14 +24,38 @@ import (
 // is not installed on it or it does not exist.
 var ErrRepoNotCloned = errors.New("repository not cloned on server")
 
+// fetchRefspecs are the refspecs every managed bare clone must fetch: heads
+// (branch state) and PR head refs. git clone --bare persists no refspec of
+// its own, and a `clone -c remote.origin.fetch=...` value becomes the ONLY
+// refspec — without the heads refspec, `git fetch` refreshes PR refs but
+// leaves every branch frozen at clone time.
+var fetchRefspecs = []string{
+	"+refs/heads/*:refs/heads/*",
+	"+refs/pull/*/head:refs/remotes/origin/pr/*",
+}
+
 // Cache manages bare clones and per-review worktrees.
 type Cache struct {
 	base        string
 	askpassPath string
 	tokenDir    string
 	gitBaseURL  string // scheme://host prefix for clone URLs
+	gitHost     string // host the askpass credential helper may answer for
 	mu          sync.Mutex
 	sf          singleflight.Group
+}
+
+// GitHost extracts the hostname from a git base URL — the only host the
+// GIT_ASKPASS helper is allowed to answer credential prompts for.
+// Empty/unparseable/file:// bases yield "" (https prompts never arise).
+func GitHost(gitBaseURL string) string {
+	if gitBaseURL == "" {
+		return "github.com"
+	}
+	if u, err := url.Parse(gitBaseURL); err == nil {
+		return u.Hostname()
+	}
+	return ""
 }
 
 // New creates a cache rooted at base using the given GIT_ASKPASS script.
@@ -45,6 +70,7 @@ func New(base, askpassPath, tokenDir, gitBaseURL string) *Cache {
 		askpassPath: askpassPath,
 		tokenDir:    tokenDir,
 		gitBaseURL:  strings.TrimSuffix(gitBaseURL, "/"),
+		gitHost:     GitHost(gitBaseURL),
 	}
 }
 
@@ -212,7 +238,9 @@ func (c *Cache) ensureBareCloneOnce(ctx context.Context, owner, repo, token stri
 		if !info.IsDir() {
 			return fmt.Errorf("bare clone path is not a directory: %s", bare)
 		}
-		return nil
+		// Repair clones made before the heads refspec was configured — they
+		// fetched PR refs only and stayed frozen at clone-time branch state.
+		return c.ensureFetchRefspecs(ctx, bare)
 	}
 	if !os.IsNotExist(err) {
 		return err
@@ -231,23 +259,52 @@ func (c *Cache) ensureBareCloneOnce(ctx context.Context, owner, repo, token stri
 	}
 	defer cleanup()
 
-	// The persisted fetch refspec covers branches and PR head refs, so plain
-	// `git fetch` keeps both current (mirrors what the manual pre-clone docs
-	// recommended).
-	// clone writes the default +refs/heads/* refspec itself; the -c adds PR
-	// head refs on top (a second heads refspec would double-map every branch
-	// and abort the initial fetch).
+	// A bare clone persists no fetch refspec of its own, so the heads and
+	// PR-head refspecs are added explicitly after the clone — without them a
+	// plain `git fetch` refreshes only FETCH_HEAD. Passing refspecs via
+	// `clone -c` does not stack: each -c assignment replaces the previous
+	// value, leaving a lone refspec behind.
 	cmd := exec.CommandContext(ctx, "git", "clone", "--bare",
-		"-c", "remote.origin.fetch=+refs/pull/*/head:refs/remotes/origin/pr/*",
 		c.gitBaseURL+"/"+owner+"/"+repo+".git", tmp)
 	cmd.Env = c.gitEnv(tokenFile)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		_ = os.RemoveAll(tmp)
 		return fmt.Errorf("%w: clone failed: %v\n%s", ErrRepoNotCloned, err, out)
 	}
+	if err := c.ensureFetchRefspecs(ctx, tmp); err != nil {
+		_ = os.RemoveAll(tmp)
+		return fmt.Errorf("configure fetch refspecs: %w", err)
+	}
 	if err := os.Rename(tmp, bare); err != nil {
 		_ = os.RemoveAll(tmp)
 		return fmt.Errorf("install clone: %w", err)
+	}
+	return nil
+}
+
+// ensureFetchRefspecs adds any missing fetch refspec to the bare clone's
+// config. `git config --get-all` exits 1 when the key is absent — that is
+// not an error here.
+func (c *Cache) ensureFetchRefspecs(ctx context.Context, bare string) error {
+	out, _ := exec.CommandContext(ctx, "git", "-C", bare, "config",
+		"--get-all", "remote.origin.fetch").Output()
+	have := strings.Split(string(out), "\n")
+	for _, want := range fetchRefspecs {
+		found := false
+		for _, h := range have {
+			if strings.TrimSpace(h) == want {
+				found = true
+				break
+			}
+		}
+		if found {
+			continue
+		}
+		cmd := exec.CommandContext(ctx, "git", "-C", bare, "config",
+			"--add", "remote.origin.fetch", want)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("add refspec %q: %w\n%s", want, err, out)
+		}
 	}
 	return nil
 }
@@ -333,6 +390,15 @@ func (c *Cache) hasActiveWorktrees(bare string) bool {
 	return count > 1
 }
 
+// WriteTokenFile persists a GitHub installation token in the token dir for
+// use as a git credential. Callers must invoke the returned cleanup when the
+// token is no longer needed. The dir is deny-listed for agent reads, so the
+// file stays hidden inside the Devin sandbox while the excluded askpass
+// helper can still consume it.
+func (c *Cache) WriteTokenFile(token string) (string, func(), error) {
+	return c.writeToken(token)
+}
+
 func (c *Cache) writeToken(token string) (string, func(), error) {
 	if err := os.MkdirAll(c.tokenDir, 0o700); err != nil {
 		return "", nil, err
@@ -358,6 +424,7 @@ func (c *Cache) gitEnv(tokenFile string) []string {
 	env := os.Environ()
 	env = append(env, "GIT_ASKPASS="+c.askpassPath)
 	env = append(env, "ELYORAA_GIT_TOKEN_FILE="+tokenFile)
+	env = append(env, "ELYORAA_GIT_HOST="+c.gitHost)
 	return env
 }
 

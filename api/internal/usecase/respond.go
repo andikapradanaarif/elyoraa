@@ -211,6 +211,7 @@ func (r *ReviewUsecase) renderRespondPrompt(j *domain.Review, convo []Conversati
 		"TriggerComment": j.TriggerComment,
 		"Conversation":   convo,
 		"RepoAvailable":  j.RepoAvailable,
+		"SyncCmd":        r.syncCmd(),
 		"Size":           r.respondSize(j),
 		"PriorJob":       prior,
 		"MaxIssues":      maxCreatedIssues,

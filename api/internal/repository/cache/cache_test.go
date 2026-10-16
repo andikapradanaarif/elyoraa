@@ -11,54 +11,78 @@ import (
 	"time"
 )
 
+// gitRun runs a git command that must succeed.
+func gitRun(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+	}
+}
+
+// gitSHA resolves a ref to a commit SHA in dir.
+func gitSHA(t *testing.T, dir, ref string) string {
+	t.Helper()
+	out, err := exec.Command("git", "-C", dir, "rev-parse", ref).Output()
+	if err != nil {
+		t.Fatalf("rev-parse %s: %v", ref, err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
 // seedBareRepo builds a small source repo with one commit (containing
 // .elyoraa.yml), then exposes it as a bare clone under
 // <seedDir>/<owner>/<repo>.git so the cache can clone it via file://.
-func seedBareRepo(t *testing.T, owner, repo string) (seedDir, headSHA string) {
+// The source repo's origin remote points at the published bare clone so
+// tests can push follow-up commits.
+func seedBareRepo(t *testing.T, owner, repo string) (seedDir, src, headSHA string) {
 	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
 	seedDir = t.TempDir()
-	src := filepath.Join(seedDir, "src")
-	run := func(dir string, args ...string) {
-		t.Helper()
-		cmd := exec.Command("git", args...)
-		cmd.Dir = dir
-		cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
-		}
-	}
+	src = filepath.Join(seedDir, "src")
 
-	run(seedDir, "init", "-b", "main", "src")
-	run(src, "config", "user.email", "test@example.com")
-	run(src, "config", "user.name", "test")
+	gitRun(t, seedDir, "init", "-b", "main", "src")
+	gitRun(t, src, "config", "user.email", "test@example.com")
+	gitRun(t, src, "config", "user.name", "test")
 	if err := os.WriteFile(filepath.Join(src, ".elyoraa.yml"),
 		[]byte("enabled: true\nbudget_minutes: 42\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	run(src, "add", ".")
-	run(src, "commit", "-m", "init")
-
-	out, err := exec.Command("git", "-C", src, "rev-parse", "HEAD").Output()
-	if err != nil {
-		t.Fatal(err)
-	}
-	headSHA = strings.TrimSpace(string(out))
+	gitRun(t, src, "add", ".")
+	gitRun(t, src, "commit", "-m", "init")
+	headSHA = gitSHA(t, src, "HEAD")
 
 	// Publish as <seedDir>/<owner>/<repo>.git — the cache joins
 	// gitBaseURL/owner/repo.git, so the file:// layout must match.
 	if err := os.MkdirAll(filepath.Join(seedDir, owner), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	run(seedDir, "clone", "--bare", src, filepath.Join(seedDir, owner, repo+".git"))
-	return seedDir, headSHA
+	origin := filepath.Join(seedDir, owner, repo+".git")
+	gitRun(t, seedDir, "clone", "--bare", src, origin)
+	gitRun(t, src, "remote", "add", "origin", origin)
+	return seedDir, src, headSHA
+}
+
+// pushSeedChange commits a new file on main in src and pushes it to the
+// published bare origin, returning the new head SHA.
+func pushSeedChange(t *testing.T, src, name, content string) string {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(src, name), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, src, "add", ".")
+	gitRun(t, src, "commit", "-m", "add "+name)
+	gitRun(t, src, "push", "origin", "main")
+	return gitSHA(t, src, "HEAD")
 }
 
 func TestFetch_CloneOnDemand(t *testing.T) {
 	owner, repo := "o", "r"
-	seedDir, _ := seedBareRepo(t, owner, repo)
+	seedDir, _, _ := seedBareRepo(t, owner, repo)
 	base := t.TempDir()
 	c := New(base, "", t.TempDir(), "file://"+seedDir)
 
@@ -75,13 +99,70 @@ func TestFetch_CloneOnDemand(t *testing.T) {
 	if _, err := os.Stat(c.barePath(owner, repo) + ".tmp-clone"); !os.IsNotExist(err) {
 		t.Fatal("tmp-clone dir left behind")
 	}
-	// PR refs must be fetchable — verify the refspec made it into config.
+	// Both refspecs must be in config: branches AND PR heads need to stay
+	// fetchable — a clone with only the PR refspec can never refresh heads.
 	out, err := exec.Command("git", "-C", c.barePath(owner, repo), "config", "--get-all", "remote.origin.fetch").Output()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(out), "refs/pull/") {
-		t.Fatalf("clone missing PR refspec: %s", out)
+	for _, want := range fetchRefspecs {
+		if !strings.Contains(string(out), want) {
+			t.Fatalf("clone missing refspec %q, got: %s", want, out)
+		}
+	}
+}
+
+// TestFetch_RefreshesBranches is the staleness regression: a clone made once
+// must see branch updates pushed later — `git fetch` previously refreshed
+// only refs/pull/*, leaving refs/heads/* frozen at clone time.
+func TestFetch_RefreshesBranches(t *testing.T) {
+	owner, repo := "o", "r"
+	seedDir, src, _ := seedBareRepo(t, owner, repo)
+	c := New(t.TempDir(), "", t.TempDir(), "file://"+seedDir)
+	ctx := context.Background()
+
+	if err := c.Fetch(ctx, owner, repo, "tok"); err != nil {
+		t.Fatalf("initial Fetch: %v", err)
+	}
+	bare := c.barePath(owner, repo)
+	before := gitSHA(t, bare, "refs/heads/main")
+
+	newSHA := pushSeedChange(t, src, "new.txt", "v2\n")
+	if newSHA == before {
+		t.Fatal("seed push did not move main")
+	}
+	if err := c.Fetch(ctx, owner, repo, "tok"); err != nil {
+		t.Fatalf("second Fetch: %v", err)
+	}
+	if got := gitSHA(t, bare, "refs/heads/main"); got != newSHA {
+		t.Fatalf("refs/heads/main not refreshed: got %s, want %s", got, newSHA)
+	}
+}
+
+// TestFetch_RepairsLegacyRefspec covers clones created before the heads
+// refspec was configured: the clone has only the PR refspec, and Fetch must
+// repair it so branch state refreshes again.
+func TestFetch_RepairsLegacyRefspec(t *testing.T) {
+	owner, repo := "o", "r"
+	seedDir, src, _ := seedBareRepo(t, owner, repo)
+	base := t.TempDir()
+	c := New(base, "", t.TempDir(), "file://"+seedDir)
+
+	// Simulate the old clone layout: a bare clone whose only fetch refspec
+	// covers PR heads.
+	bare := c.barePath(owner, repo)
+	if err := os.MkdirAll(filepath.Dir(bare), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, base, "clone", "--bare", "file://"+filepath.Join(seedDir, owner, repo+".git"), bare)
+	gitRun(t, bare, "config", "--add", "remote.origin.fetch", "+refs/pull/*/head:refs/remotes/origin/pr/*")
+
+	newSHA := pushSeedChange(t, src, "later.txt", "v3\n")
+	if err := c.Fetch(context.Background(), owner, repo, "tok"); err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if got := gitSHA(t, bare, "refs/heads/main"); got != newSHA {
+		t.Fatalf("legacy clone not repaired: refs/heads/main=%s, want %s", got, newSHA)
 	}
 }
 
@@ -104,7 +185,7 @@ func TestFetch_CloneFailure_NoLeftover(t *testing.T) {
 
 func TestFetch_ConcurrentClones(t *testing.T) {
 	owner, repo := "o", "r"
-	seedDir, _ := seedBareRepo(t, owner, repo)
+	seedDir, _, _ := seedBareRepo(t, owner, repo)
 	c := New(t.TempDir(), "", t.TempDir(), "file://"+seedDir)
 
 	var wg sync.WaitGroup
@@ -130,7 +211,7 @@ func TestFetch_ConcurrentClones(t *testing.T) {
 
 func TestReadRepoFile_DefaultBranch(t *testing.T) {
 	owner, repo := "o", "r"
-	seedDir, _ := seedBareRepo(t, owner, repo)
+	seedDir, _, _ := seedBareRepo(t, owner, repo)
 	c := New(t.TempDir(), "", t.TempDir(), "file://"+seedDir)
 	if err := c.Fetch(context.Background(), owner, repo, "tok"); err != nil {
 		t.Fatal(err)

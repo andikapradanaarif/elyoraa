@@ -95,12 +95,8 @@ api/
 
 ## Notes
 
-- **Repositories must be pre-cloned** as bare clones at `WORKSPACE_BASE/{owner}/{repo}.git`. The bot will not clone repos on demand. If a repo is not cloned, the review is skipped with a comment. To register a repo:
-  ```bash
-  git clone --bare https://github.com/{owner}/{repo}.git {WORKSPACE_BASE}/{owner}/{repo}.git
-  git -C {WORKSPACE_BASE}/{owner}/{repo}.git config --local --add \
-    remote.origin.fetch "+refs/pull/*/head:refs/remotes/origin/pr/*"
-  ```
+- **Repositories are cloned on demand** as bare clones at `WORKSPACE_BASE/{owner}/{repo}.git` on the first webhook for a repo, then refreshed with `git fetch --prune` on every job — branches (`refs/heads/*`) and PR heads (`refs/remotes/origin/pr/*`) both stay current. If the App isn't installed, the job is skipped with a comment.
+- **The agent gets real git access** to a worktree of the clone: read-only commands plus `checkout`/`switch`/`reset`/`restore`/`clean`/`worktree` (which run outside the sandbox, since a worktree's git metadata lives in the shared clone). `repo-sync.sh` (generated next to `devin-config.json`, also sandbox-excluded) runs a fixed-argv, env-scrubbed credentialed `git fetch` when the agent needs refs newer than job start. The askpass helper answers credentials only for the `GIT_BASE_URL` host, so the installation token can't be redirected to another remote. Every remote-capable git command (`fetch`, `pull`, `clone`, `push`, `ls-remote`, `submodule`, …), `git credential`, `git config`, remote mutation, and shared-ref writers (`checkout -b`, `branch -d`, `tag -f`, `worktree add`, …) are denied outright — repo-sync is the only credentialed git path.
 - The `devin-config.json` is generated at startup to the path in `DEVIN_CONFIG_PATH`.
 - Short-lived GitHub installation tokens are written to `ELYORAA_TOKEN_DIR` (default `/var/lib/elyoraa/tokens`) and supplied to git via `GIT_ASKPASS`.
 - Per-review `XDG_CACHE_HOME` and `TMPDIR` are isolated; `HOME` and `XDG_CONFIG_HOME` must point at the Devin credentials volume.

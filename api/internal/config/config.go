@@ -87,6 +87,9 @@ type Config struct {
 	// GitBaseURL prefixes clone-on-demand URLs (default https://github.com).
 	// Override for GitHub Enterprise or file:// in tests.
 	GitBaseURL string
+	// GitAskpassPath is the GIT_ASKPASS helper script used for credentialed
+	// git operations — by the server's fetches and by the agent's repo-sync.
+	GitAskpassPath string
 }
 
 // Load reads configuration from environment variables and applies defaults.
@@ -150,6 +153,7 @@ func Load() (*Config, error) {
 		Paused:                getBool("ELYORAA_PAUSED", false),
 		PRSkipLabel:           getEnv("PR_SKIP_LABEL", "elyoraa:skip"),
 		GitBaseURL:            getEnv("GIT_BASE_URL", ""),
+		GitAskpassPath:        getEnv("GIT_ASKPASS_PATH", "/app/git-askpass.sh"),
 	}
 
 	if cfg.RespondTimeout <= 0 {
