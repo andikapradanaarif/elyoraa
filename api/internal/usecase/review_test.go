@@ -81,6 +81,28 @@ func TestClassifyDevinErrorBinaryMissing(t *testing.T) {
 	}
 }
 
+func TestClassifyDevinErrorSignalKilled(t *testing.T) {
+	// A process killed by a signal produces *exec.ExitError whose
+	// ProcessState never exited cleanly — OOM kills and deploy
+	// interruptions must retry, not mark the job permanently failed.
+	err := exec.Command("sh", "-c", "kill -9 $$").Run()
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) || ee.ProcessState.Exited() {
+		t.Fatalf("setup: expected signal-killed ExitError, got %v", err)
+	}
+	tr, reason := classifyDevinError(err, context.Background(), "partial output")
+	if !tr {
+		t.Fatalf("signal-killed run should be transient, reason=%q", reason)
+	}
+	// An ordinary non-zero exit is not a signal — classification falls
+	// through to the output patterns as before.
+	err = exec.Command("sh", "-c", "exit 1").Run()
+	tr, _ = classifyDevinError(err, context.Background(), "some error")
+	if tr {
+		t.Fatal("exit-status failure with unrecognized output should not be transient")
+	}
+}
+
 func TestTailString(t *testing.T) {
 	s := "short"
 	if got := tailString(s, 8192); got != s {

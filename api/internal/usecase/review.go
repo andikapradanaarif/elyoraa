@@ -1130,6 +1130,13 @@ func classifyDevinError(err error, attemptCtx context.Context, out string) (bool
 	if attemptCtx.Err() == context.Canceled {
 		return false, "canceled"
 	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ProcessState != nil && !exitErr.ProcessState.Exited() {
+		// Killed by a signal before it could write a verdict — OOM,
+		// container stop, or a crash. Almost always transient; same
+		// retry path as malformed output.
+		return true, exitErr.ProcessState.String()
+	}
 	if rsn, det := deterministicDevinReason(err, out); det {
 		return false, rsn
 	}
