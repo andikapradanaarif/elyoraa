@@ -1418,14 +1418,11 @@ if env -i \
   GIT_ASKPASS="${GIT_ASKPASS:?GIT_ASKPASS is not set}" \
   ELYORAA_GIT_TOKEN_FILE="${ELYORAA_GIT_TOKEN_FILE:?ELYORAA_GIT_TOKEN_FILE is not set}" \
   ELYORAA_GIT_HOST="${ELYORAA_GIT_HOST:?ELYORAA_GIT_HOST is not set}" \
-  git -C "$BARE" fetch --prune origin; then
+  git -C "$BARE" fetch --prune --update-head-ok origin; then
   exit 0
 fi
 
-# Fetch refuses to update a branch that is checked out in any linked
-# worktree — elyoraa's own worktrees are always detached, so a hit here means
-# the agent itself ran ` + "`git checkout <branch>`" + ` earlier.
-echo "repo-sync: fetch failed — if a branch is checked out in this worktree, run 'git switch --detach' first, then retry" >&2
+echo "repo-sync: fetch failed" >&2
 exit 1
 `
 

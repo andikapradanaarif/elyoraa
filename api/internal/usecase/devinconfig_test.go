@@ -190,6 +190,28 @@ func TestRepoSync_EndToEnd(t *testing.T) {
 	if out, err := cmd.CombinedOutput(); err == nil {
 		t.Fatalf("repo-sync accepted a nested non-managed repo: %s", out)
 	}
+
+	// A branch checked out in a linked worktree (as an agent may do) must not
+	// abort the fetch — --update-head-ok keeps the sync working.
+	wt2 := filepath.Join(base, "o", "r", "wt-2-branch")
+	runGit(t, bare, "worktree", "add", wt2, "main")
+	if err := os.WriteFile(filepath.Join(src, "c.txt"), []byte("v3\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, src, "add", ".")
+	runGit(t, src, "commit", "-m", "v3")
+	runGit(t, src, "push", "origin", "main")
+	newSHA = gitRevParse(t, src, "HEAD")
+
+	cmd = exec.Command(script)
+	cmd.Dir = wt
+	cmd.Env = syncEnv
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("repo-sync failed with a branch checked out: %v\n%s", err, out)
+	}
+	if got := gitRevParse(t, bare, "refs/heads/main"); got != newSHA {
+		t.Fatalf("heads not refreshed despite checked-out branch: got %s, want %s", got, newSHA)
+	}
 }
 
 // TestGitAskpass_HostLock runs the deployed askpass script against credential

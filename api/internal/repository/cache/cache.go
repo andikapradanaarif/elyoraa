@@ -105,7 +105,12 @@ func (c *Cache) Fetch(ctx context.Context, owner, repo, token string) error {
 		// non-fatal
 	}
 
-	cmd := exec.CommandContext(ctx, "git", "-C", bare, "fetch", "--prune")
+	// --update-head-ok: an agent may legitimately `git checkout <branch>` in
+	// its worktree; without the flag that pins the shared ref and makes every
+	// other job's fetch abort with "refusing to fetch into branch checked
+	// out". The worst outcome here is one agent's own checkout going stale.
+	cmd := exec.CommandContext(ctx, "git", "-C", bare, "fetch",
+		"--prune", "--update-head-ok")
 	cmd.Env = c.gitEnv(tokenFile)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git fetch: %w\n%s", err, out)
@@ -423,6 +428,7 @@ func (c *Cache) writeToken(token string) (string, func(), error) {
 func (c *Cache) gitEnv(tokenFile string) []string {
 	env := os.Environ()
 	env = append(env, "GIT_ASKPASS="+c.askpassPath)
+	env = append(env, "GIT_TERMINAL_PROMPT=0")
 	env = append(env, "ELYORAA_GIT_TOKEN_FILE="+tokenFile)
 	env = append(env, "ELYORAA_GIT_HOST="+c.gitHost)
 	return env
