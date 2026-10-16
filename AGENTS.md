@@ -35,7 +35,7 @@ cd api
 GHCR_TOKEN=your_pat ./deploy/deploy-ghcr.sh
 ```
 
-The image is Debian-based because a host-provided `devin` binary is usually glibc-linked. The `devin` binary and `~/.config/devin` credentials are bind-mounted via `docker-compose.yml`.
+The image is Debian-based and bundles the Devin CLI (fetched from `static.devin.ai/cli` with sha256 verification; pin a release via `--build-arg DEVIN_CLI_VERSION=<ver>`). Only `~/.config/devin` credentials and `~/.local/share/devin` data are bind-mounted via `docker-compose.yml`.
 
 ## Local development
 
@@ -78,7 +78,7 @@ The image is Debian-based because a host-provided `devin` binary is usually glib
 ## Review flow
 
 - Repositories are cloned on demand: the first webhook or job for a repo runs `git clone --bare` into `WORKSPACE_BASE/{owner}/{repo}.git` using the installation token via `GIT_ASKPASS` (concurrent clones deduped via singleflight, temp-dir + rename). The clone is configured with two fetch refspecs — `+refs/heads/*:refs/heads/*` and `+refs/pull/*/head:refs/remotes/origin/pr/*` — so every `fetch --prune` refreshes both branches and PR heads; `Fetch` adds any missing refspec to existing clones (legacy clones that only fetched PR heads self-repair). `GIT_BASE_URL` overrides the host prefix (default `https://github.com`). If the App isn't installed on the repo, the review is skipped with a comment.
-- The agent runs in a worktree of the bare clone and can use git directly: read-only commands run inside the sandbox; `checkout`/`switch`/`reset`/`restore`/`clean`/`worktree` are `sandbox.excluded` because a worktree's git metadata lives in the shared clone outside the writable root. A generated `repo-sync.sh` (written next to `devin-config.json` at startup, also sandbox-excluded) runs a fixed-argv `env -i git -C <bare> fetch --prune origin` with server-supplied credentials, so the agent can refresh refs mid-run without ever seeing the token. Prompts reference it as `{{.SyncCmd}}`.
+- The agent runs in a worktree of the bare clone and can use git directly: read-only commands run inside the sandbox; `checkout`/`switch`/`reset`/`restore`/`clean`/`worktree` are `sandbox.excluded` because a worktree's git metadata lives in the shared clone outside the writable root. A generated `repo-sync.sh` (written next to `devin-config.json` at startup, also sandbox-excluded) runs a fixed-argv `env -i git -C <bare> fetch --prune --update-head-ok origin` with server-supplied credentials, so the agent can refresh refs mid-run without ever seeing the token. Prompts reference it as `{{.SyncCmd}}`.
 - Per-repo policy: `.elyoraa.yml` on the repo's **default branch** (`enabled`, `budget_minutes`, `lines_per_minute`, `ignored_paths`, `mention_router`, `size_gate_mode`, `skip_label`). Always read from the bare clone's `HEAD` — a PR can't change its own policy. `enabled: false` drops jobs silently; the effective budget/ignored_paths are persisted on the job at enqueue.
 - Opt-out label: `PR_SKIP_LABEL` (default `elyoraa:skip`) suppresses automated jobs on a labeled PR; explicit mentions override it.
 - Reaction telemetry: GitHub `reaction` events on bot-authored comments increment `elyoraa_reactions_total{reaction,action}`; reactions on other users' comments are ignored.

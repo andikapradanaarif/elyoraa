@@ -28,8 +28,6 @@ services:
       # Queue + job-record persistence (QUEUE_BACKEND=file). Queued jobs and
       # outcomes survive restarts/deploys.
       - queue-data:/var/lib/elyoraa/queue
-      # Bind the host's `devin` binary into the container.
-      - ${DEVIN_BIN_HOST_PATH:-/usr/local/bin/devin}:/usr/local/bin/devin:ro
     env_file: .env
     secrets:
       - github-app-private-key

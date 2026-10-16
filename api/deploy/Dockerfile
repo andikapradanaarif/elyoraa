@@ -15,8 +15,27 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends git ca-certificates bubblewrap socat curl && \
     rm -rf /var/lib/apt/lists/*
 
-# Devin CLI must be installed in the image or mounted in. This expects `devin` in PATH.
-# If Devin is distributed as a tarball, add the installation step here.
+# Devin CLI, bundled so no host bind-mount is required. The release manifest
+# at static.devin.ai/cli/<version>/manifest.json carries per-platform tarball
+# URLs + sha256 — verify the checksum, then lay the tarball down at
+# /usr/local (bin/devin + share/devin/docs land where the CLI expects them).
+# Pin a release with: docker build --build-arg DEVIN_CLI_VERSION=3000.11.92 ...
+ARG DEVIN_CLI_VERSION=current
+RUN set -eu; \
+    case "$(uname -m)" in \
+      x86_64)  target="x86_64-unknown-linux" ;; \
+      aarch64) target="aarch64-unknown-linux" ;; \
+      *) echo "unsupported arch: $(uname -m)" >&2; exit 1 ;; \
+    esac; \
+    manifest=$(curl -fsSL "https://static.devin.ai/cli/${DEVIN_CLI_VERSION}/manifest.json"); \
+    entry=$(printf '%s' "$manifest" | grep -o "\"${target}\"[[:space:]]*:[[:space:]]*{[^}]*}"); \
+    url=$(printf '%s' "$entry" | grep -o '"url"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"\([^"]*\)"$/\1/'); \
+    sha=$(printf '%s' "$entry" | grep -o '"sha256"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"\([^"]*\)"$/\1/'); \
+    [ -n "$url" ] && [ -n "$sha" ] || { echo "no ${target} bundle in manifest" >&2; exit 1; }; \
+    curl -fsSL "$url" -o /tmp/devin.tar.gz; \
+    echo "${sha}  /tmp/devin.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/devin.tar.gz -C /usr/local bin/devin share; \
+    rm -f /tmp/devin.tar.gz
 
 RUN useradd -m -s /bin/sh elyoraa
 
