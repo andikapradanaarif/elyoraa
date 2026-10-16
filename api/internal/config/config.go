@@ -33,7 +33,6 @@ type Config struct {
 	// QueueJobLease bounds how long a Postgres queue claim may run before
 	// another replica may reclaim it. 0 = ReviewTimeout + 5m.
 	QueueJobLease         time.Duration
-	RedisURL              string
 	MaxPatchBytes         int
 	MaxChangedFiles       int
 	PRSizeGate            bool
@@ -119,7 +118,6 @@ func Load() (*Config, error) {
 		QueueBackend:          getEnv("QUEUE_BACKEND", "memory"),
 		QueueFilePath:         getEnv("QUEUE_FILE_PATH", "/var/lib/elyoraa/queue.db"),
 		QueueJobLease:         getDuration("QUEUE_JOB_LEASE", 0),
-		RedisURL:              getEnv("REDIS_URL", ""),
 		MaxPatchBytes:         getInt("MAX_PATCH_BYTES", 100_000),
 		MaxChangedFiles:       getInt("MAX_CHANGED_FILES", 50),
 		PRSizeGate:            getBool("PR_SIZE_GATE", true),
