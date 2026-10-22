@@ -2,6 +2,7 @@ package usecase
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -221,6 +222,84 @@ func TestApplySizeGate_RespondJobsNeverGated(t *testing.T) {
 	}
 	if j.SizeEstMinutes == 0 || j.SizeLines == 0 {
 		t.Fatalf("respond job should still record size stats, got est=%d lines=%d", j.SizeEstMinutes, j.SizeLines)
+	}
+}
+
+// Payload counters include generated files, so a counter-based oversize
+// nomination is re-measured with per-file data before the job is typed —
+// nexus#553: a small scaffold PR carrying a big bun.lock must stay a review.
+func TestApplySizeGate_CounterRefinement(t *testing.T) {
+	newUC := func() *WebhookUsecase {
+		return testWebhookUsecase(&config.Config{
+			PRSizeGate: true, PRReviewBudgetMinutes: 15, PRLinesPerMinute: 100,
+			SizeGateMode: "deterministic", MaxChangedFiles: 50,
+		})
+	}
+	stub := func(u *WebhookUsecase, calls *int, info *github.PRInfo, err error) {
+		u.getPRStats = func(ctx context.Context, id int64, owner, repo string, num, mpb, mf int) (*github.PRInfo, error) {
+			*calls++
+			return info, err
+		}
+	}
+
+	// Counters say 2000 lines (~20min > 15min) but 1700 are bun.lock —
+	// refined 300 lines → under budget → stays a review.
+	u := newUC()
+	calls := 0
+	stub(u, &calls, &github.PRInfo{Files: []*github.FileInfo{
+		{Path: "backoffice/src/main.tsx", Additions: 300},
+		{Path: "bun.lock", Additions: 1700},
+	}}, nil)
+	j := domain.Review{Owner: "o", Repo: "r", PRNumber: 553, HeadSHA: "abc"}
+	u.applySizeGate(context.Background(), &j, domain.RepoConfig{}, nil, sizeStats{additions: 2000, changedFiles: 2})
+	if calls != 1 {
+		t.Fatalf("expected one refine fetch, got %d", calls)
+	}
+	if j.Type != "" || j.SizeOversize {
+		t.Fatalf("generated-heavy PR must stay a review, got type=%q oversize=%v", j.Type, j.SizeOversize)
+	}
+	if j.SizeLines != 300 {
+		t.Fatalf("SizeLines should record the refined count, got %d", j.SizeLines)
+	}
+
+	// Still oversize after refinement → split nomination stands.
+	u = newUC()
+	calls = 0
+	stub(u, &calls, &github.PRInfo{Files: []*github.FileInfo{
+		{Path: "main.go", Additions: 1700},
+		{Path: "bun.lock", Additions: 300},
+	}}, nil)
+	j = domain.Review{Owner: "o", Repo: "r", PRNumber: 5, HeadSHA: "abc"}
+	u.applySizeGate(context.Background(), &j, domain.RepoConfig{}, nil, sizeStats{additions: 2000, changedFiles: 2})
+	if calls != 1 || j.Type != "split" {
+		t.Fatalf("genuinely oversize PR should nominate split, got type=%q calls=%d", j.Type, calls)
+	}
+
+	// A failed fetch keeps the counter verdict — process-time re-verification
+	// still rescues a false nomination.
+	u = newUC()
+	calls = 0
+	stub(u, &calls, nil, errors.New("boom"))
+	j = domain.Review{Owner: "o", Repo: "r", PRNumber: 5, HeadSHA: "abc"}
+	u.applySizeGate(context.Background(), &j, domain.RepoConfig{}, nil, sizeStats{additions: 2000, changedFiles: 2})
+	if calls != 1 || j.Type != "split" {
+		t.Fatalf("fetch failure should keep the counter verdict, got type=%q calls=%d", j.Type, calls)
+	}
+
+	// Under-budget counters never fetch; a truncated payload can't be
+	// rescued by the fetch (the capped list truncates the same way).
+	u = newUC()
+	calls = 0
+	stub(u, &calls, nil, errors.New("unreachable"))
+	j = domain.Review{Owner: "o", Repo: "r", PRNumber: 5, HeadSHA: "abc"}
+	u.applySizeGate(context.Background(), &j, domain.RepoConfig{}, nil, sizeStats{additions: 100, changedFiles: 2})
+	if calls != 0 || j.Type != "" {
+		t.Fatalf("under-budget counters must not fetch, got type=%q calls=%d", j.Type, calls)
+	}
+	j = domain.Review{Owner: "o", Repo: "r", PRNumber: 5, HeadSHA: "abc"}
+	u.applySizeGate(context.Background(), &j, domain.RepoConfig{}, nil, sizeStats{additions: 10, changedFiles: 60})
+	if calls != 0 || j.Type != "split" {
+		t.Fatalf("truncated counters must nominate split without fetching, got type=%q calls=%d", j.Type, calls)
 	}
 }
 

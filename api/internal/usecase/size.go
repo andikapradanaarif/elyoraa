@@ -240,17 +240,17 @@ var generatedPathMarkers = []string{
 	"node_modules/",
 	"dist/",
 	"third_party/",
+	"generated/",
+	"__generated__/",
+	".lock", // every *.lock* lockfile: bun.lock, yarn.lock, uv.lock, Chart.lock…
 	"package-lock.json",
-	"yarn.lock",
+	"npm-shrinkwrap.json",
 	"pnpm-lock.yaml",
-	"composer.lock",
-	"cargo.lock",
-	"gemfile.lock",
-	"poetry.lock",
+	"package.resolved", // SwiftPM
 	"go.sum",
 	"go.work.sum",
-	".pb.go",
-	".gen.go",
+	".pb.",  // protobuf output: .pb.go, .pb.cc, .pb.h…
+	".gen.", // *.gen.* codegen convention: routeTree.gen.ts, foo.gen.go…
 	"_generated.",
 	".min.js",
 	".min.css",

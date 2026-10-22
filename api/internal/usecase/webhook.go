@@ -55,29 +55,35 @@ func WithDeliveryID(ctx context.Context, deliveryID string) context.Context {
 	return context.WithValue(ctx, deliveryIDKey, deliveryID)
 }
 
+// getPRFunc fetches per-file PR data for the size gate — github.Client.GetPR
+// in production, a stub in tests.
+type getPRFunc func(ctx context.Context, installationID int64, owner, repo string, number, maxPatchBytes, maxFiles int) (*github.PRInfo, error)
+
 // WebhookUsecase validates and routes incoming GitHub webhooks.
 type WebhookUsecase struct {
-	cfg     *config.Config
-	gh      *github.Client
-	d       dedup.Interface
-	q       *queue.Queue
-	store   repository.WebhookStore
-	limiter *rateLimiter
-	cache   *cache.Cache
-	metrics *metrics.Registry
+	cfg        *config.Config
+	gh         *github.Client
+	getPRStats getPRFunc
+	d          dedup.Interface
+	q          *queue.Queue
+	store      repository.WebhookStore
+	limiter    *rateLimiter
+	cache      *cache.Cache
+	metrics    *metrics.Registry
 }
 
 // NewWebhookUsecase creates a WebhookUsecase.
 func NewWebhookUsecase(cfg *config.Config, client *github.Client, d dedup.Interface, q *queue.Queue, store repository.WebhookStore, c *cache.Cache, m *metrics.Registry) *WebhookUsecase {
 	return &WebhookUsecase{
-		cfg:     cfg,
-		gh:      client,
-		d:       d,
-		q:       q,
-		store:   store,
-		limiter: newRateLimiter(cfg.MentionRateLimit, cfg.MentionRateWindow),
-		cache:   c,
-		metrics: m,
+		cfg:        cfg,
+		gh:         client,
+		getPRStats: client.GetPR,
+		d:          d,
+		q:          q,
+		store:      store,
+		limiter:    newRateLimiter(cfg.MentionRateLimit, cfg.MentionRateWindow),
+		cache:      c,
+		metrics:    m,
 	}
 }
 
@@ -185,7 +191,8 @@ func (u *WebhookUsecase) handlePullRequest(ctx context.Context, deliveryID strin
 	}
 
 	// The pull_request payload already carries the size counters — the gate
-	// costs no extra API call.
+	// is free until the raw count nominates oversize, which pays one GetPR
+	// to exclude generated files before the job is typed.
 	u.applySizeGate(ctx, &review, rc, nil, sizeStats{
 		additions:    pr.GetAdditions(),
 		deletions:    pr.GetDeletions(),
@@ -460,7 +467,9 @@ type sizeStats struct {
 // human commands are honored even when a fresh estimate no longer says the PR
 // is too big — acceptance keywords ("create the issues") must work on a PR
 // that re-measures under budget. An empty payload without prInfo falls back
-// to one GetPR call; a fetch failure leaves the job as-is.
+// to one GetPR call; a fetch failure leaves the job as-is. Payload counters
+// count generated files (bun.lock, *.pb.*), so an oversize nomination from
+// counters is re-measured with per-file data before the job is typed.
 func (u *WebhookUsecase) applySizeGate(ctx context.Context, r *domain.Review, rc domain.RepoConfig, prInfo *github.PRInfo, st sizeStats) {
 	if r.IsIssue() {
 		return
@@ -483,18 +492,16 @@ func (u *WebhookUsecase) applySizeGate(ctx context.Context, r *domain.Review, rc
 	}
 
 	var size prSize
+	var counterBased bool
 	switch {
 	case prInfo != nil:
 		size = estimatePRSizeWith(prInfo, lpm, gen)
 	case st.additions+st.deletions+st.changedFiles > 0:
 		size = estimateFromCounts(st.additions, st.deletions, st.changedFiles, lpm, u.cfg.MaxChangedFiles)
+		counterBased = true
 	default:
-		gctx, cancel := context.WithTimeout(ctx, u.cfg.CommentTimeout)
-		info, err := u.gh.GetPR(gctx, r.InstallationID, r.Owner, r.Repo, r.PRNumber, 0, u.cfg.MaxChangedFiles)
-		cancel()
-		if err != nil {
-			slog.Warn("size gate: could not fetch PR stats, proceeding as review",
-				"owner", r.Owner, "repo", r.Repo, "pr", r.PRNumber, "error", err)
+		info := u.gatePRInfo(ctx, r)
+		if info == nil {
 			return
 		}
 		size = estimatePRSizeWith(info, lpm, gen)
@@ -562,6 +569,28 @@ func (u *WebhookUsecase) applySizeGate(ctx context.Context, r *domain.Review, rc
 		return
 	}
 
+	// Payload counters can't see paths — generated churn (bun.lock, *.pb.*,
+	// dist/) inflates line counts without adding review effort. Before
+	// nominating split work, buy the per-file verdict with one GetPR; it
+	// also lets ignored_paths apply on the counter path. A truncated
+	// payload can't be rescued (the fetch hits the same cap), and a failed
+	// fetch keeps the counter verdict — process-time re-verification still
+	// demotes a false nomination.
+	if counterBased && !size.Truncated {
+		if info := u.gatePRInfo(ctx, r); info != nil {
+			size = estimatePRSizeWith(info, lpm, gen)
+			r.SizeEstMinutes = size.EstMinutes
+			r.SizeLines = size.Additions + size.Deletions
+			r.SizeOversize = size.tooBig(budget)
+			if !r.SizeOversize {
+				slog.Info("size gate: refined under budget, keeping review",
+					"owner", r.Owner, "repo", r.Repo, "pr", r.PRNumber,
+					"est_minutes", size.EstMinutes, "generated_files", size.GeneratedFiles)
+				return
+			}
+		}
+	}
+
 	slog.Info("oversize PR at enqueue",
 		"owner", r.Owner, "repo", r.Repo, "pr", r.PRNumber,
 		"files", size.Files, "additions", size.Additions, "deletions", size.Deletions,
@@ -581,6 +610,24 @@ func (u *WebhookUsecase) applySizeGate(ctx context.Context, r *domain.Review, rc
 		return
 	}
 	r.Type = "split"
+}
+
+// gatePRInfo fetches per-file PR data for the size gate. A missing fetcher
+// or a failed fetch returns nil — callers keep the coarser verdict they
+// already have.
+func (u *WebhookUsecase) gatePRInfo(ctx context.Context, r *domain.Review) *github.PRInfo {
+	if u.getPRStats == nil {
+		return nil
+	}
+	gctx, cancel := context.WithTimeout(ctx, u.cfg.CommentTimeout)
+	defer cancel()
+	info, err := u.getPRStats(gctx, r.InstallationID, r.Owner, r.Repo, r.PRNumber, 0, u.cfg.MaxChangedFiles)
+	if err != nil {
+		slog.Warn("size gate: could not fetch PR stats",
+			"owner", r.Owner, "repo", r.Repo, "pr", r.PRNumber, "error", err)
+		return nil
+	}
+	return info
 }
 
 func (u *WebhookUsecase) enqueueReview(ctx context.Context, review domain.Review, evt *domain.WebhookEvent, rc domain.RepoConfig) (domain.Review, error) {

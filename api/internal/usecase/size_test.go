@@ -322,12 +322,31 @@ func TestIsGeneratedPath(t *testing.T) {
 		"web/app.min.js",
 		"sub/PACKAGE-LOCK.JSON",
 		"ui/node_modules/lib/index.js",
+		// nexus#553: a lockfile-heavy PR must not be measured by raw lines.
+		"bun.lock",
+		"packages/api/bun.lockb",
+		"uv.lock",
+		".terraform.lock.hcl",
+		"backoffice/src/routeTree.gen.ts",
+		"proto/gen/api.pb.cc",
+		"src/generated/client.go",
+		"app/__generated__/Query.graphql.ts",
+		"Package.resolved",
 	} {
 		if !isGeneratedPath(p) {
 			t.Fatalf("%q should be generated", p)
 		}
 	}
-	for _, p := range []string{"main.go", "internal/usecase/review.go", "README.md", "go.mod"} {
+	for _, p := range []string{
+		"main.go",
+		"internal/usecase/review.go",
+		"README.md",
+		"go.mod",
+		"docs/deadlock.md",  // "lock" alone is not a lockfile
+		"src/blocklist.go",  // idem
+		"scripts/gen.ts",    // *.gen.* needs a leading dot segment
+		"docs/generated.md", // a file named generated*, not a generated/ dir
+	} {
 		if isGeneratedPath(p) {
 			t.Fatalf("%q should not be generated", p)
 		}
