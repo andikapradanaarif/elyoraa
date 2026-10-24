@@ -10,8 +10,9 @@ services:
     image: ${ELYORAA_IMAGE:-elyoraa}
     container_name: elyoraa
     # Grace for SHUTDOWN_DRAIN_TIMEOUT plus HTTP shutdown — the default 10s
-    # would SIGKILL mid-review. Keep >= the drain timeout you configure.
-    stop_grace_period: 20m
+    # would SIGKILL mid-review. Keep >= the drain timeout you configure
+    # (drain defaults to REVIEW_TIMEOUT, 30m).
+    stop_grace_period: 35m
     ports:
       - "8080:8080"
     volumes:

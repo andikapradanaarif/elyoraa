@@ -125,8 +125,8 @@ func Load() (*Config, error) {
 		PRLinesPerMinute:      getInt("PR_LINES_PER_MINUTE", 100),
 		LogLevel:              getEnv("LOG_LEVEL", "info"),
 		MetricsPath:           getEnv("METRICS_PATH", "/metrics"),
-		ReviewTimeout:         getDuration("REVIEW_TIMEOUT", 10*time.Minute),
-		CommentTimeout:        getDuration("COMMENT_TIMEOUT", 10*time.Second),
+		ReviewTimeout:         getDuration("REVIEW_TIMEOUT", 30*time.Minute),
+		CommentTimeout:        getDuration("COMMENT_TIMEOUT", time.Minute),
 		HTTPReadTimeout:       getDuration("HTTP_READ_TIMEOUT", 10*time.Second),
 		HTTPWriteTimeout:      getDuration("HTTP_WRITE_TIMEOUT", 10*time.Second),
 		DevinMaxRetries:       getInt("DEVIN_MAX_RETRIES", 3),
@@ -159,6 +159,9 @@ func Load() (*Config, error) {
 	}
 	if cfg.ShutdownDrainTimeout <= 0 {
 		cfg.ShutdownDrainTimeout = cfg.ReviewTimeout
+	}
+	if budget := time.Duration(cfg.PRReviewBudgetMinutes) * time.Minute; cfg.ReviewTimeout < budget {
+		fmt.Fprintf(os.Stderr, "warning: REVIEW_TIMEOUT (%s) < PR_REVIEW_BUDGET_MINUTES (%s) — budget-sized reviews will be killed mid-run; keep REVIEW_TIMEOUT >= the budget\n", cfg.ReviewTimeout, budget)
 	}
 	if cfg.MentionRateLimit < 0 {
 		return nil, fmt.Errorf("MENTION_RATE_LIMIT must be >= 0, got %d", cfg.MentionRateLimit)
