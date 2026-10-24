@@ -50,7 +50,17 @@ RUN chmod +x /app/git-askpass.sh /app/entrypoint.sh
 # Devin skill: install to the user's global skill directory.
 RUN mkdir -p /home/elyoraa/.config/devin/skills/pr-review
 COPY deploy/skills/pr-review/SKILL.md /home/elyoraa/.config/devin/skills/pr-review/SKILL.md
-RUN chown -R elyoraa:elyoraa /home/elyoraa
+
+# Devin's Linux sandbox creates $HOME/.local/share/chisel/sandbox-locks on
+# the first sandboxed exec call. Compose bind-mounts a host dir over
+# ~/.local/share/devin — when .local/share is absent from the image, Docker
+# creates the mount's missing parent dirs as root:root, the elyoraa user
+# cannot create the sibling `chisel` dir, and EVERY sandboxed exec fails
+# with Permission denied. Pre-create the tree elyoraa-owned: Docker only
+# auto-creates *missing* mount parents, so existing image dirs keep their
+# ownership under the bind-mount.
+RUN mkdir -p /home/elyoraa/.local/share/chisel/sandbox-locks && \
+    chown -R elyoraa:elyoraa /home/elyoraa
 
 # Pre-create workspace, token, devin-config, queue, and tmp dirs.
 RUN mkdir -p /var/lib/elyoraa/workspace /var/lib/elyoraa/tokens /var/lib/elyoraa/devin-config /var/lib/elyoraa/queue /tmp/elyoraa && \

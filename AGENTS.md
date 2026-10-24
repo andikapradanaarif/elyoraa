@@ -35,7 +35,7 @@ cd api
 GHCR_TOKEN=your_pat ./deploy/deploy-ghcr.sh
 ```
 
-The image is Debian-based and bundles the Devin CLI (fetched from `static.devin.ai/cli` with sha256 verification; pin a release via `--build-arg DEVIN_CLI_VERSION=<ver>`). Only `~/.config/devin` credentials and `~/.local/share/devin` data are bind-mounted via `docker-compose.yml`.
+The image is Debian-based and bundles the Devin CLI (fetched from `static.devin.ai/cli` with sha256 verification; pin a release via `--build-arg DEVIN_CLI_VERSION=<ver>`). Only `~/.config/devin` credentials and `~/.local/share/devin` data are bind-mounted via `docker-compose.yml`. The image pre-creates `~/.local/share/chisel` elyoraa-owned (and `entrypoint.sh` repairs it) because Devin's sandbox makes `chisel/sandbox-locks` on the first exec — without it Docker creates the mount's parents root:root and every sandboxed exec fails with Permission denied.
 
 ## Local development
 
