@@ -53,20 +53,6 @@ func parseRepoConfig(raw []byte, repo string) domain.RepoConfig {
 	return rc
 }
 
-// repoConfig resolves the repo's effective .elyoraa.yml, cloning the bare
-// repo on demand when needed so `enabled: false` applies from a repo's
-// first webhook rather than only after a job has already run. The clone is
-// bounded by the request context — a huge repo may exceed it, in which case
-// this delivery uses defaults and the redelivery sees the finished clone.
-func (u *WebhookUsecase) repoConfig(ctx context.Context, owner, repo string, installationID int64) domain.RepoConfig {
-	if u.cache != nil && u.gh != nil && !u.cache.IsCloned(owner, repo) {
-		if token, err := u.gh.InstallationToken(ctx, installationID); err == nil {
-			_ = u.cache.EnsureBareClone(ctx, owner, repo, token)
-		}
-	}
-	return loadRepoConfig(ctx, u.cache, owner, repo)
-}
-
 // repoEnabled reports whether the repo config disables elyoraa entirely.
 func repoEnabled(rc domain.RepoConfig) bool {
 	return rc.Enabled == nil || *rc.Enabled

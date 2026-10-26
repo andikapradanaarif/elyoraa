@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -67,6 +68,19 @@ func seedBareRepo(t *testing.T, owner, repo string) (seedDir, src, headSHA strin
 	return seedDir, src, headSHA
 }
 
+// preClone registers a repo the way an operator does: a manual
+// `git clone --bare` into the cache base. A plain clone writes no fetch
+// refspec, so tests exercising it also cover Fetch's refspec self-repair.
+func preClone(t *testing.T, c *Cache, seedDir, owner, repo string) {
+	t.Helper()
+	bare := c.barePath(owner, repo)
+	if err := os.MkdirAll(filepath.Dir(bare), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, seedDir, "clone", "--bare",
+		"file://"+filepath.Join(seedDir, owner, repo+".git"), bare)
+}
+
 // pushSeedChange commits a new file on main in src and pushes it to the
 // published bare origin, returning the new head SHA.
 func pushSeedChange(t *testing.T, src, name, content string) string {
@@ -80,27 +94,24 @@ func pushSeedChange(t *testing.T, src, name, content string) string {
 	return gitSHA(t, src, "HEAD")
 }
 
-func TestFetch_CloneOnDemand(t *testing.T) {
+func TestFetch_RegisteredRepo(t *testing.T) {
 	owner, repo := "o", "r"
 	seedDir, _, _ := seedBareRepo(t, owner, repo)
 	base := t.TempDir()
 	c := New(base, "", t.TempDir(), "file://"+seedDir)
 
-	if c.IsCloned(owner, repo) {
-		t.Fatal("repo should not be cloned yet")
+	// Unregistered repo: Fetch must refuse — the cache never clones.
+	if err := c.Fetch(context.Background(), owner, repo, "tok"); !errors.Is(err, ErrRepoNotCloned) {
+		t.Fatalf("Fetch on unregistered repo = %v, want ErrRepoNotCloned", err)
 	}
+
+	// Registration is a plain manual `git clone --bare`, which writes no
+	// fetch refspec — Fetch must repair it so branches AND PR heads stay
+	// fetchable.
+	preClone(t, c, seedDir, owner, repo)
 	if err := c.Fetch(context.Background(), owner, repo, "tok"); err != nil {
 		t.Fatalf("Fetch: %v", err)
 	}
-	if !c.IsCloned(owner, repo) {
-		t.Fatal("repo should be cloned after Fetch")
-	}
-	// The temp clone dir must not linger.
-	if _, err := os.Stat(c.barePath(owner, repo) + ".tmp-clone"); !os.IsNotExist(err) {
-		t.Fatal("tmp-clone dir left behind")
-	}
-	// Both refspecs must be in config: branches AND PR heads need to stay
-	// fetchable — a clone with only the PR refspec can never refresh heads.
 	out, err := exec.Command("git", "-C", c.barePath(owner, repo), "config", "--get-all", "remote.origin.fetch").Output()
 	if err != nil {
 		t.Fatal(err)
@@ -121,9 +132,7 @@ func TestFetch_RefreshesBranches(t *testing.T) {
 	c := New(t.TempDir(), "", t.TempDir(), "file://"+seedDir)
 	ctx := context.Background()
 
-	if err := c.Fetch(ctx, owner, repo, "tok"); err != nil {
-		t.Fatalf("initial Fetch: %v", err)
-	}
+	preClone(t, c, seedDir, owner, repo)
 	bare := c.barePath(owner, repo)
 	before := gitSHA(t, bare, "refs/heads/main")
 
@@ -166,27 +175,22 @@ func TestFetch_RepairsLegacyRefspec(t *testing.T) {
 	}
 }
 
-func TestFetch_CloneFailure_NoLeftover(t *testing.T) {
-	base := t.TempDir()
-	seed := t.TempDir() // empty — nothing to clone
-	c := New(base, "", t.TempDir(), "file://"+seed)
+func TestFetch_UnregisteredRepo(t *testing.T) {
+	c := New(t.TempDir(), "", t.TempDir(), "file://"+t.TempDir())
 
-	err := c.Fetch(context.Background(), "o", "missing", "tok")
-	if err == nil {
-		t.Fatal("expected clone failure")
+	if err := c.Fetch(context.Background(), "o", "missing", "tok"); !errors.Is(err, ErrRepoNotCloned) {
+		t.Fatalf("Fetch = %v, want ErrRepoNotCloned", err)
 	}
 	if c.IsCloned("o", "missing") {
-		t.Fatal("failed clone must not appear cloned")
-	}
-	if _, serr := os.Stat(c.barePath("o", "missing") + ".tmp-clone"); !os.IsNotExist(serr) {
-		t.Fatal("tmp-clone dir left after failed clone")
+		t.Fatal("unregistered fetch must not create a clone")
 	}
 }
 
-func TestFetch_ConcurrentClones(t *testing.T) {
+func TestFetch_ConcurrentFetches(t *testing.T) {
 	owner, repo := "o", "r"
 	seedDir, _, _ := seedBareRepo(t, owner, repo)
 	c := New(t.TempDir(), "", t.TempDir(), "file://"+seedDir)
+	preClone(t, c, seedDir, owner, repo)
 
 	var wg sync.WaitGroup
 	errs := make(chan error, 8)
@@ -204,18 +208,13 @@ func TestFetch_ConcurrentClones(t *testing.T) {
 			t.Fatalf("concurrent Fetch: %v", err)
 		}
 	}
-	if !c.IsCloned(owner, repo) {
-		t.Fatal("repo should be cloned")
-	}
 }
 
 func TestReadRepoFile_DefaultBranch(t *testing.T) {
 	owner, repo := "o", "r"
 	seedDir, _, _ := seedBareRepo(t, owner, repo)
 	c := New(t.TempDir(), "", t.TempDir(), "file://"+seedDir)
-	if err := c.Fetch(context.Background(), owner, repo, "tok"); err != nil {
-		t.Fatal(err)
-	}
+	preClone(t, c, seedDir, owner, repo)
 	data, err := c.ReadRepoFile(context.Background(), owner, repo, ".elyoraa.yml")
 	if err != nil {
 		t.Fatalf("ReadRepoFile: %v", err)

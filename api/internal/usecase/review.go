@@ -130,7 +130,7 @@ func (r *ReviewUsecase) Process(ctx context.Context, j domain.Review) (attempts 
 	if err := r.cache.Fetch(ctx, j.Owner, j.Repo, token); err != nil {
 		if errors.Is(err, cache.ErrRepoNotCloned) {
 			r.updatePending(ctx, &j, fmt.Sprintf(
-				"Review skipped: could not clone `%s/%s` — is the GitHub App installed on this repository?",
+				"Review skipped: `%s/%s` is not registered on this server.",
 				j.Owner, j.Repo,
 			))
 			r.markStatus(ctx, j, "skipped")

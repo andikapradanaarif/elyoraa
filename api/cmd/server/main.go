@@ -113,7 +113,11 @@ func main() {
 
 	go q.Start(ctx)
 	go runSweeper(ctx, c, cfg.WorktreeTTLHours)
-	go runEvictor(ctx, c, cfg.WorkspaceDiskBudgetGB)
+	// The evictor deletes registered clones — an operator-managed registry
+	// must not shrink itself, so it only runs when explicitly enabled.
+	if cfg.WorkspaceDiskBudgetGB > 0 {
+		go runEvictor(ctx, c, cfg.WorkspaceDiskBudgetGB)
+	}
 	if db != nil && cfg.AuditRetentionDays > 0 {
 		go runRetention(ctx, store, cfg.AuditRetentionDays)
 	}

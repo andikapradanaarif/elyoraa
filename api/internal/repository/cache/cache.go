@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/url"
 	"os"
 	"os/exec"
@@ -15,13 +16,12 @@ import (
 	"sync"
 	"syscall"
 	"time"
-
-	"golang.org/x/sync/singleflight"
 )
 
-// ErrRepoNotCloned is returned when the bare clone for a repository does not
-// exist on disk and could not be created — typically because the GitHub App
-// is not installed on it or it does not exist.
+// ErrRepoNotCloned is returned when no bare clone exists for a repository
+// under the workspace base — i.e. the repo is not registered. Registration
+// is manual (`git clone --bare` into WORKSPACE_BASE/{owner}/{repo}.git);
+// elyoraa never clones on its own.
 var ErrRepoNotCloned = errors.New("repository not cloned on server")
 
 // fetchRefspecs are the refspecs every managed bare clone must fetch: heads
@@ -39,10 +39,8 @@ type Cache struct {
 	base        string
 	askpassPath string
 	tokenDir    string
-	gitBaseURL  string // scheme://host prefix for clone URLs
 	gitHost     string // host the askpass credential helper may answer for
 	mu          sync.Mutex
-	sf          singleflight.Group
 }
 
 // GitHost extracts the hostname from a git base URL — the only host the
@@ -59,8 +57,9 @@ func GitHost(gitBaseURL string) string {
 }
 
 // New creates a cache rooted at base using the given GIT_ASKPASS script.
-// gitBaseURL prefixes clone URLs ("https://github.com"); empty defaults to
-// github.com. file:// bases are useful in tests.
+// gitBaseURL ("https://github.com") determines which host the askpass helper
+// may answer credential prompts for; empty defaults to github.com. Repos are
+// registered by manually cloning them into base — the cache never clones.
 func New(base, askpassPath, tokenDir, gitBaseURL string) *Cache {
 	if gitBaseURL == "" {
 		gitBaseURL = "https://github.com"
@@ -69,7 +68,6 @@ func New(base, askpassPath, tokenDir, gitBaseURL string) *Cache {
 		base:        base,
 		askpassPath: askpassPath,
 		tokenDir:    tokenDir,
-		gitBaseURL:  strings.TrimSuffix(gitBaseURL, "/"),
 		gitHost:     GitHost(gitBaseURL),
 	}
 }
@@ -80,27 +78,27 @@ func (c *Cache) IsCloned(owner, repo string) bool {
 	return err == nil && info.IsDir()
 }
 
-// EnsureBareClone returns once a bare clone exists for owner/repo.
-func (c *Cache) EnsureBareClone(ctx context.Context, owner, repo, token string) error {
-	key := owner + "/" + repo
-	_, err, _ := c.sf.Do(key, func() (interface{}, error) {
-		return nil, c.ensureBareCloneOnce(ctx, owner, repo, token)
-	})
-	return err
-}
-
 // Fetch refreshes refs in the bare clone and ensures PR heads are available.
+// The clone must already exist — the workspace base is the repo registry, so
+// a missing clone means the repo was never registered (or was unregistered
+// after the job enqueued). Any missing heads/PR-head fetch refspec is added
+// before the fetch, so a plain manual `git clone --bare` is enough to
+// register a repo.
 func (c *Cache) Fetch(ctx context.Context, owner, repo, token string) error {
-	if err := c.EnsureBareClone(ctx, owner, repo, token); err != nil {
-		return err
+	if !c.IsCloned(owner, repo) {
+		return ErrRepoNotCloned
 	}
+	bare := c.barePath(owner, repo)
+	if err := c.ensureFetchRefspecs(ctx, bare); err != nil {
+		return fmt.Errorf("configure fetch refspecs: %w", err)
+	}
+
 	tokenFile, cleanup, err := c.writeToken(token)
 	if err != nil {
 		return err
 	}
 	defer cleanup()
 
-	bare := c.barePath(owner, repo)
 	if err := c.updateLastReviewed(bare); err != nil {
 		// non-fatal
 	}
@@ -163,8 +161,8 @@ func (c *Cache) Sweep(ctx context.Context, ttl time.Duration) error {
 			return nil
 		}
 		if strings.HasSuffix(info.Name(), ".tmp-clone") {
-			// A clone temp dir abandoned by a crash — the next EnsureBareClone
-			// would remove it anyway; sweep just bounds the window.
+			// A clone temp dir abandoned by a crash — older versions cloned
+			// on demand into .tmp-clone dirs; sweep just bounds the window.
 			if time.Since(info.ModTime()) >= ttl {
 				_ = os.RemoveAll(path)
 			}
@@ -185,7 +183,9 @@ func (c *Cache) Sweep(ctx context.Context, ttl time.Duration) error {
 }
 
 // EvictLRU removes the least-recently-used bare clone if disk budget is exceeded.
-// It is a best-effort safety valve; disk usage is estimated from the workspace base.
+// It is a best-effort safety valve; disk usage is estimated from the workspace
+// base. Removing a clone unregisters the repo — under the manual registry
+// model this stays off unless WORKSPACE_DISK_BUDGET_GB is set.
 func (c *Cache) EvictLRU(ctx context.Context, budgetGB int) error {
 	// Walk all bare clones and find the one with the oldest last-reviewed file
 	// that has no active worktrees.
@@ -228,6 +228,8 @@ func (c *Cache) EvictLRU(ctx context.Context, budgetGB int) error {
 		return nil
 	}
 
+	slog.Warn("disk budget exceeded, evicting least-recently-used clone — repo must be re-registered",
+		"path", oldest, "last_reviewed", oldestTime, "used_gb", used, "budget_gb", budgetGB)
 	return os.RemoveAll(oldest)
 }
 
@@ -236,61 +238,13 @@ func (c *Cache) DiskUsageGB() (int64, error) {
 	return c.diskUsageGB(c.base)
 }
 
-func (c *Cache) ensureBareCloneOnce(ctx context.Context, owner, repo, token string) error {
-	bare := c.barePath(owner, repo)
-	info, err := os.Stat(bare)
-	if err == nil {
-		if !info.IsDir() {
-			return fmt.Errorf("bare clone path is not a directory: %s", bare)
-		}
-		// Repair clones made before the heads refspec was configured — they
-		// fetched PR refs only and stayed frozen at clone-time branch state.
-		return c.ensureFetchRefspecs(ctx, bare)
-	}
-	if !os.IsNotExist(err) {
-		return err
-	}
-
-	// Clone on demand into a temp dir, then rename — a killed or failed clone
-	// never leaves a half repo at the canonical path (IsCloned checks the dir
-	// exists). Concurrent clones of the same repo share one attempt via the
-	// singleflight in EnsureBareClone.
-	tmp := bare + ".tmp-clone"
-	_ = os.RemoveAll(tmp)
-
-	tokenFile, cleanup, err := c.writeToken(token)
-	if err != nil {
-		return err
-	}
-	defer cleanup()
-
-	// A bare clone persists no fetch refspec of its own, so the heads and
-	// PR-head refspecs are added explicitly after the clone — without them a
-	// plain `git fetch` refreshes only FETCH_HEAD. Passing refspecs via
-	// `clone -c` does not stack: each -c assignment replaces the previous
-	// value, leaving a lone refspec behind.
-	cmd := exec.CommandContext(ctx, "git", "clone", "--bare",
-		c.gitBaseURL+"/"+owner+"/"+repo+".git", tmp)
-	cmd.Env = c.gitEnv(tokenFile)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		_ = os.RemoveAll(tmp)
-		return fmt.Errorf("%w: clone failed: %v\n%s", ErrRepoNotCloned, err, out)
-	}
-	if err := c.ensureFetchRefspecs(ctx, tmp); err != nil {
-		_ = os.RemoveAll(tmp)
-		return fmt.Errorf("configure fetch refspecs: %w", err)
-	}
-	if err := os.Rename(tmp, bare); err != nil {
-		_ = os.RemoveAll(tmp)
-		return fmt.Errorf("install clone: %w", err)
-	}
-	return nil
-}
-
 // ensureFetchRefspecs adds any missing fetch refspec to the bare clone's
 // config. `git config --get-all` exits 1 when the key is absent — that is
-// not an error here.
+// not an error here. Concurrent repairs on the same clone race on git's
+// config.lock, so the check-and-add is serialized process-wide.
 func (c *Cache) ensureFetchRefspecs(ctx context.Context, bare string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	out, _ := exec.CommandContext(ctx, "git", "-C", bare, "config",
 		"--get-all", "remote.origin.fetch").Output()
 	have := strings.Split(string(out), "\n")

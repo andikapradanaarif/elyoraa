@@ -114,7 +114,7 @@ func Load() (*Config, error) {
 		WorkspaceBase:         getEnv("WORKSPACE_BASE", "/var/lib/elyoraa/workspace"),
 		MaxConcurrentReviews:  getInt("MAX_CONCURRENT_REVIEWS", 2),
 		WorktreeTTLHours:      time.Duration(getInt("WORKTREE_TTL_HOURS", 24)) * time.Hour,
-		WorkspaceDiskBudgetGB: getInt("WORKSPACE_DISK_BUDGET_GB", 40),
+		WorkspaceDiskBudgetGB: getInt("WORKSPACE_DISK_BUDGET_GB", 0),
 		QueueBackend:          getEnv("QUEUE_BACKEND", "memory"),
 		QueueFilePath:         getEnv("QUEUE_FILE_PATH", "/var/lib/elyoraa/queue.db"),
 		QueueJobLease:         getDuration("QUEUE_JOB_LEASE", 0),

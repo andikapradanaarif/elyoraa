@@ -173,7 +173,7 @@ func (u *WebhookUsecase) handlePullRequest(ctx context.Context, deliveryID strin
 		return domain.Review{}, fmt.Errorf("invalid repository")
 	}
 	owner, repoName := ownerRepo[0], ownerRepo[1]
-	rc := u.repoConfig(ctx, owner, repoName, prEvent.GetInstallation().GetID())
+	rc := loadRepoConfig(ctx, u.cache, owner, repoName)
 
 	review := domain.Review{
 		DeliveryID:     deliveryID,
@@ -292,7 +292,7 @@ func (u *WebhookUsecase) handleIssueComment(ctx context.Context, deliveryID stri
 
 	issueNumber := issue.GetNumber()
 	instID := cmEvent.GetInstallation().GetID()
-	rc := u.repoConfig(ctx, owner, repoName, instID)
+	rc := loadRepoConfig(ctx, u.cache, owner, repoName)
 	labels := labelNames(issue.Labels)
 
 	// If the comment is on a PR, trigger a rereview.
@@ -631,6 +631,19 @@ func (u *WebhookUsecase) gatePRInfo(ctx context.Context, r *domain.Review) *gith
 }
 
 func (u *WebhookUsecase) enqueueReview(ctx context.Context, review domain.Review, evt *domain.WebhookEvent, rc domain.RepoConfig) (domain.Review, error) {
+	// WORKSPACE_BASE is the repo registry: only pre-cloned repos are served.
+	// Webhooks for anything else are acknowledged and dropped silently —
+	// no pending comment, no queue slot. Registration is a manual
+	// `git clone --bare` on the server.
+	if u.cache != nil && !u.cache.IsCloned(review.Owner, review.Repo) {
+		if evt != nil {
+			_ = u.store.Record(ctx, evt)
+		}
+		_ = u.store.UpdateStatus(ctx, review.DeliveryID, "dropped", "repo not registered")
+		slog.Info("dropping job: repo not registered", "repo", review.Owner+"/"+review.Repo)
+		return domain.Review{}, nil
+	}
+
 	// Skip bot-authored PRs for auto-reviews, but allow explicit mentions
 	// (rereview/issue analysis) to proceed even if the PR was bot-authored.
 	if review.IsBot() && review.TriggerComment == "" {
@@ -887,7 +900,7 @@ func (u *WebhookUsecase) handlePullRequestReview(ctx context.Context, deliveryID
 	ownerRepo := strings.SplitN(repo.GetFullName(), "/", 2)
 	owner, repoName := ownerRepo[0], ownerRepo[1]
 	instID := rvEvent.GetInstallation().GetID()
-	rc := u.repoConfig(ctx, owner, repoName, instID)
+	rc := loadRepoConfig(ctx, u.cache, owner, repoName)
 
 	if pr.GetDraft() {
 		return domain.Review{}, nil
@@ -991,7 +1004,7 @@ func (u *WebhookUsecase) handlePullRequestReviewComment(ctx context.Context, del
 	ownerRepo := strings.SplitN(repo.GetFullName(), "/", 2)
 	owner, repoName := ownerRepo[0], ownerRepo[1]
 	instID := rcEvent.GetInstallation().GetID()
-	rc := u.repoConfig(ctx, owner, repoName, instID)
+	rc := loadRepoConfig(ctx, u.cache, owner, repoName)
 
 	if pr.GetDraft() {
 		return domain.Review{}, nil
@@ -1079,7 +1092,7 @@ func (u *WebhookUsecase) handleIssues(ctx context.Context, deliveryID string, bo
 	ownerRepo := strings.SplitN(repo.GetFullName(), "/", 2)
 	owner, repoName := ownerRepo[0], ownerRepo[1]
 	instID := isEvent.GetInstallation().GetID()
-	rc := u.repoConfig(ctx, owner, repoName, instID)
+	rc := loadRepoConfig(ctx, u.cache, owner, repoName)
 
 	r := domain.Review{
 		DeliveryID:         deliveryID,

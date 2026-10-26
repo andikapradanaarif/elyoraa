@@ -10,8 +10,30 @@ import (
 	"github.com/andikapradanaarif/elyoraa/internal/dedup"
 	"github.com/andikapradanaarif/elyoraa/internal/domain"
 	"github.com/andikapradanaarif/elyoraa/internal/repository"
+	"github.com/andikapradanaarif/elyoraa/internal/repository/cache"
 	"github.com/andikapradanaarif/elyoraa/internal/repository/queue"
 )
+
+// WORKSPACE_BASE is the repo registry: a webhook for a repo with no bare
+// clone is acknowledged and dropped silently — no job, no GitHub call (nil
+// client proves it). elyoraa never clones on demand.
+func TestEnqueueReview_UnregisteredRepoDropped(t *testing.T) {
+	cfg := &config.Config{}
+	q := queue.New(1, nil, nil, 8)
+	c := cache.New(t.TempDir(), "", t.TempDir(), "")
+	u := NewWebhookUsecase(cfg, nil, dedup.New(), q, repository.NewWebhookStore(nil), c, nil)
+
+	job := domain.Review{
+		Owner: "o", Repo: "r", PRNumber: 7, HeadSHA: "abc", DeliveryID: "d-0",
+	}
+	got, err := u.enqueueReview(context.Background(), job, nil, domain.RepoConfig{})
+	if err != nil {
+		t.Fatalf("unregistered repo must drop silently, got %v", err)
+	}
+	if got.JobKey != "" {
+		t.Fatal("unregistered repo must not produce a job")
+	}
+}
 
 // A mention past the author's rate limit must be dropped before any Devin
 // work is enqueued — and before any GitHub call (nil client proves it).
