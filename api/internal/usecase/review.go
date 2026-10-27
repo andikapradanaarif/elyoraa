@@ -129,11 +129,19 @@ func (r *ReviewUsecase) Process(ctx context.Context, j domain.Review) (attempts 
 
 	if err := r.cache.Fetch(ctx, j.Owner, j.Repo, token); err != nil {
 		if errors.Is(err, cache.ErrRepoNotCloned) {
-			r.updatePending(ctx, &j, fmt.Sprintf(
-				"Review skipped: `%s/%s` is not registered on this server.",
-				j.Owner, j.Repo,
-			))
-			r.markStatus(ctx, j, "skipped")
+			// Repo unregistered after enqueue — audit/log only, nothing
+			// posts to GitHub. The pending comment is deleted so no stale
+			// "in progress" is left behind.
+			if j.PendingCommentID != 0 {
+				delCtx, cancel := context.WithTimeout(context.Background(), r.cfg.CommentTimeout)
+				_ = r.gh.DeleteComment(delCtx, j.InstallationID, j.Owner, j.Repo, j.PendingCommentID)
+				cancel()
+			}
+			if r.store != nil && j.DeliveryID != "" {
+				_ = r.store.UpdateStatus(ctx, j.DeliveryID, "skipped", "repo not registered")
+			}
+			slog.Info("skipping job: repo not registered",
+				"job", j.JobKey, "repo", j.Owner+"/"+j.Repo)
 			return attempts, nil
 		}
 		r.updatePending(ctx, &j, "Review failed: could not fetch repository.")
