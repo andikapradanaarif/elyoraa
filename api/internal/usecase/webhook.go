@@ -1242,8 +1242,36 @@ func (u *WebhookUsecase) RetryJob(ctx context.Context, key string) (domain.Revie
 	if !ok {
 		return domain.Review{}, ErrDuplicate
 	}
+
+	// Make the retry visible: a failed job's pending comment is still
+	// around (flip it back to queued); a completed job's was deleted —
+	// post a fresh one. Best-effort, the run proceeds either way.
+	if newJob.PendingCommentID != 0 {
+		editCtx, cancel := context.WithTimeout(context.Background(), u.cfg.CommentTimeout)
+		err := u.gh.EditComment(editCtx, newJob.InstallationID, newJob.Owner, newJob.Repo, newJob.PendingCommentID,
+			queuedBody(newJob, jobBudget(u.cfg, *newJob)))
+		cancel()
+		if err != nil {
+			newJob.PendingCommentID = 0
+		}
+	}
+	if newJob.PendingCommentID == 0 {
+		pendingCtx, cancel := context.WithTimeout(context.Background(), u.cfg.CommentTimeout)
+		id, err := u.gh.PostPendingComment(pendingCtx, newJob.InstallationID, newJob.Owner, newJob.Repo, newJob.PRNumber,
+			queuedBody(newJob, jobBudget(u.cfg, *newJob)))
+		cancel()
+		if err == nil {
+			newJob.PendingCommentID = id
+		}
+	}
+
 	if !u.q.Submit(newCtx, *newJob) {
 		u.d.Done(*newJob)
+		if newJob.PendingCommentID != 0 {
+			editCtx, cancel := context.WithTimeout(context.Background(), u.cfg.CommentTimeout)
+			_ = u.gh.EditComment(editCtx, newJob.InstallationID, newJob.Owner, newJob.Repo, newJob.PendingCommentID, queueFullBody)
+			cancel()
+		}
 		return domain.Review{}, ErrQueueFull
 	}
 	slog.Info("job retried",
