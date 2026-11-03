@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -15,12 +16,13 @@ import (
 )
 
 const (
-	metaBucket  = "meta"
-	jobsBucket  = "jobs"
-	doneBucket  = "done"
-	tailKey     = "tail"
-	headKey     = "head"
-	maxIDKeyLen = 20
+	metaBucket     = "meta"
+	jobsBucket     = "jobs"
+	inflightBucket = "inflight"
+	doneBucket     = "done"
+	tailKey        = "tail"
+	headKey        = "head"
+	maxIDKeyLen    = 20
 )
 
 // BoltDBBackend is a file-backed durable queue using BoltDB.
@@ -53,6 +55,36 @@ func OpenBoltDB(path string, maxSize int) (*BoltDBBackend, error) {
 		}
 		if _, err := tx.CreateBucketIfNotExists([]byte(jobsBucket)); err != nil {
 			return err
+		}
+		if _, err := tx.CreateBucketIfNotExists([]byte(inflightBucket)); err != nil {
+			return err
+		}
+		return nil
+	}); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+
+	// Requeue jobs claimed by a process that died before MarkDone. Bolt is
+	// single-process, so anything in "inflight" at open belongs to a dead
+	// run — it goes back to "jobs" under its original key and re-runs.
+	if err := db.Update(func(tx *bolt.Tx) error {
+		jobs := tx.Bucket([]byte(jobsBucket))
+		inflight := tx.Bucket([]byte(inflightBucket))
+		var keys [][]byte
+		if err := inflight.ForEach(func(k, _ []byte) error {
+			keys = append(keys, append([]byte(nil), k...))
+			return nil
+		}); err != nil {
+			return err
+		}
+		for _, k := range keys {
+			if err := jobs.Put(k, inflight.Get(k)); err != nil {
+				return err
+			}
+			if err := inflight.Delete(k); err != nil {
+				return err
+			}
 		}
 		return nil
 	}); err != nil {
@@ -142,6 +174,7 @@ func (b *BoltDBBackend) Put(ctx context.Context, j domain.Review) bool {
 }
 
 func (b *BoltDBBackend) Next(ctx context.Context) (domain.Review, bool) {
+	var errCount int
 	for {
 		select {
 		case <-ctx.Done():
@@ -167,6 +200,11 @@ func (b *BoltDBBackend) Next(ctx context.Context) (domain.Review, bool) {
 			if err := json.Unmarshal(v, &j); err != nil {
 				return err
 			}
+			// Claim, don't delete: the row moves to "inflight" until
+			// MarkDone so a crash mid-job requeues it at the next open.
+			if err := tx.Bucket([]byte(inflightBucket)).Put(k, v); err != nil {
+				return err
+			}
 			if err := bkt.Delete(k); err != nil {
 				return err
 			}
@@ -179,9 +217,14 @@ func (b *BoltDBBackend) Next(ctx context.Context) (domain.Review, bool) {
 		b.mu.Unlock()
 
 		if err != nil {
+			if errCount%100 == 0 {
+				slog.Error("queue next: db error", "error", err, "streak", errCount+1)
+			}
+			errCount++
 			time.Sleep(100 * time.Millisecond)
 			continue
 		}
+		errCount = 0
 
 		if ok {
 			return j, true
@@ -199,7 +242,32 @@ func (b *BoltDBBackend) Next(ctx context.Context) (domain.Review, bool) {
 }
 
 func (b *BoltDBBackend) MarkDone(ctx context.Context, j domain.Review) {
-	// The job is already removed from the pending queue by Next.
+	// Remove the claimed row from "inflight" — matched by payload key since
+	// the row id isn't carried on the job. In-flight rows number <= workers,
+	// so a scan is cheap. Best-effort: a missed row is requeued at open and
+	// the job simply runs again.
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return
+	}
+	_ = b.db.Update(func(tx *bolt.Tx) error {
+		inflight := tx.Bucket([]byte(inflightBucket))
+		var found []byte
+		if err := inflight.ForEach(func(k, v []byte) error {
+			var stored domain.Review
+			if err := json.Unmarshal(v, &stored); err == nil && stored.JobKey == j.JobKey {
+				found = append([]byte(nil), k...)
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		if found != nil {
+			return inflight.Delete(found)
+		}
+		return nil
+	})
 }
 
 func (b *BoltDBBackend) Len() int {

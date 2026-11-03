@@ -442,16 +442,52 @@ func (t *BoltJobTracker) Get(_ context.Context, key string) (JobRecord, bool) {
 	return rec, found
 }
 
-// StuckProcessing reports every "processing" record — BoltDB is
-// single-process, so anything processing at boot died with the process.
+// StuckProcessing reports records whose job can never finish: "processing"
+// or "queued" records with no live queue row. A record whose row survived —
+// still queued, or reclaimed from "inflight" at open — re-runs on its own
+// and must be left alone. Bolt is single-process, so a missing row at boot
+// means the job is gone for good (same rule as the Postgres backend).
 func (t *BoltJobTracker) StuckProcessing(ctx context.Context) []JobRecord {
 	var out []JobRecord
-	for _, r := range t.List(ctx) {
-		if r.Status == JobStatusProcessing {
-			out = append(out, r)
+	_ = t.db.View(func(tx *bolt.Tx) error {
+		return tx.Bucket([]byte(outcomesBucket)).ForEach(func(_, v []byte) error {
+			var w jobRecordWire
+			if err := json.Unmarshal(v, &w); err != nil {
+				return nil
+			}
+			if w.Status != JobStatusProcessing && w.Status != JobStatusQueued {
+				return nil
+			}
+			if queueRowExists(tx, w.JobKey) {
+				return nil
+			}
+			rec := w.JobRecord
+			rec.Job = w.Job
+			out = append(out, rec)
+			return nil
+		})
+	})
+	sortRecords(out)
+	return out
+}
+
+// queueRowExists reports whether a queue row (queued or in-flight) still
+// carries this job key — the job re-runs on its own, so its record is not
+// stuck. Rows are few enough that scanning payloads is cheap.
+func queueRowExists(tx *bolt.Tx, jobKey string) bool {
+	for _, name := range []string{jobsBucket, inflightBucket} {
+		found := false
+		if err := tx.Bucket([]byte(name)).ForEach(func(_, v []byte) error {
+			var stored domain.Review
+			if err := json.Unmarshal(v, &stored); err == nil && stored.JobKey == jobKey {
+				found = true
+			}
+			return nil
+		}); err == nil && found {
+			return true
 		}
 	}
-	return out
+	return false
 }
 
 // prune deletes the oldest records once the bucket exceeds the cap.

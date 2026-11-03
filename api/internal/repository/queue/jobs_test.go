@@ -121,6 +121,61 @@ func TestMemoryJobTrackerEviction(t *testing.T) {
 	}
 }
 
+// StuckProcessing must be row-aware: records whose queue row survives are
+// not stuck — the job re-runs on its own. Only rows that vanished for good
+// (killed mid-flight before inflight tracking existed, or lost between Next
+// and Started) are reported dead.
+func TestBoltStuckProcessingRowAware(t *testing.T) {
+	dir := t.TempDir()
+	b, err := OpenBoltDB(filepath.Join(dir, "queue.db"), 0)
+	if err != nil {
+		t.Fatalf("OpenBoltDB: %v", err)
+	}
+	defer b.Close()
+	tr, err := NewBoltJobTracker(b.db)
+	if err != nil {
+		t.Fatalf("NewBoltJobTracker: %v", err)
+	}
+	ctx := context.Background()
+
+	live := domain.Review{JobKey: "o/r/1/live", Owner: "o", Repo: "r", PRNumber: 1}
+	inflight := domain.Review{JobKey: "o/r/1/inflight", Owner: "o", Repo: "r", PRNumber: 1}
+	deadProc := domain.Review{JobKey: "o/r/1/deadproc", Owner: "o", Repo: "r", PRNumber: 1}
+	deadQueued := domain.Review{JobKey: "o/r/1/deadq", Owner: "o", Repo: "r", PRNumber: 1}
+
+	// queued record + live row → not stuck (will be picked up).
+	if !b.Put(ctx, live) {
+		t.Fatal("Put live failed")
+	}
+	tr.Enqueued(ctx, live)
+
+	// processing record + in-flight row → not stuck (requeues at open).
+	if !b.Put(ctx, inflight) {
+		t.Fatal("Put inflight failed")
+	}
+	tr.Enqueued(ctx, inflight)
+	if _, ok := b.Next(ctx); !ok {
+		t.Fatal("Next inflight failed")
+	}
+	tr.Started(ctx, inflight)
+
+	// processing record, no row at all → stuck.
+	tr.Enqueued(ctx, deadProc)
+	tr.Started(ctx, deadProc)
+
+	// queued record, no row at all → stuck (Next/Started race orphan).
+	tr.Enqueued(ctx, deadQueued)
+
+	stuck := tr.StuckProcessing(ctx)
+	got := map[string]bool{}
+	for _, rec := range stuck {
+		got[rec.JobKey] = true
+	}
+	if len(got) != 2 || !got[deadProc.JobKey] || !got[deadQueued.JobKey] {
+		t.Fatalf("StuckProcessing = %v, want {%s %s}", got, deadProc.JobKey, deadQueued.JobKey)
+	}
+}
+
 func TestNewJobTrackerSelectsBolt(t *testing.T) {
 	dir := t.TempDir()
 	b, err := OpenBoltDB(filepath.Join(dir, "queue.db"), 0)
