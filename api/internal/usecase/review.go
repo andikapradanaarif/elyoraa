@@ -964,6 +964,9 @@ func (r *ReviewUsecase) devinPreflight(ctx context.Context, worktree, model stri
 
 	cmd := exec.CommandContext(pfCtx, r.cfg.DevinBin, "models", "list")
 	cmd.Dir = worktree
+	// A leaked subprocess inheriting the pipe must not hold Wait past the
+	// timeout — bound the post-kill drain.
+	cmd.WaitDelay = 30 * time.Second
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		if pfCtx.Err() == context.DeadlineExceeded {
@@ -986,6 +989,10 @@ func (r *ReviewUsecase) devinPreflight(ctx context.Context, worktree, model stri
 func (r *ReviewUsecase) execDevin(ctx context.Context, worktree string, args []string, tmpDir, tokenFile string) (string, error) {
 	cmd := exec.CommandContext(ctx, r.cfg.DevinBin, args...)
 	cmd.Dir = worktree
+	// CommandContext kills only the direct child; a leaked grandchild
+	// inheriting stdout would otherwise keep CombinedOutput blocked past
+	// the attempt timeout. WaitDelay forcibly closes the pipes.
+	cmd.WaitDelay = 30 * time.Second
 	env := os.Environ()
 	env = append(env,
 		"XDG_CACHE_HOME="+tmpDir,
