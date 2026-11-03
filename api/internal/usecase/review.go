@@ -751,13 +751,13 @@ func (r *ReviewUsecase) updatePending(ctx context.Context, j *domain.Review, bod
 	_ = r.gh.EditComment(ctx2, j.InstallationID, j.Owner, j.Repo, j.PendingCommentID, body)
 }
 
-// ReconcileStuckJobs runs once at startup: tracker records still in
-// "processing" belong to jobs killed mid-flight. Mark them failed — this
-// makes them retryable via POST /jobs/retry — and fix the pending comment
-// so the PR doesn't show "in progress" forever. Jobs still sitting queued
-// in a durable backend re-run on their own. StuckProcessing is
-// backend-aware: on Postgres it only returns orphaned records, so a replica
-// starting up never fails jobs another replica is running.
+// ReconcileStuckJobs runs once at startup: tracker records whose job is
+// gone for good — killed mid-flight with no surviving queue row — are
+// marked failed (retryable via POST /jobs/retry) and their pending
+// comments fixed so the PR doesn't show "in progress" forever.
+// StuckProcessing is backend-aware: a record whose queue row survived —
+// still queued on disk, reclaimed from in-flight, or owned by a live
+// replica — re-runs on its own and is left alone.
 func (r *ReviewUsecase) ReconcileStuckJobs(ctx context.Context) {
 	if r.q == nil {
 		return
@@ -777,9 +777,13 @@ func (r *ReviewUsecase) ReconcileStuckJobs(ctx context.Context) {
 		t.Failed(ctx, j, 0, errors.New("interrupted by restart"))
 		if j.PendingCommentID != 0 {
 			editCtx, cancel := context.WithTimeout(ctx, r.cfg.CommentTimeout)
-			_ = r.gh.EditComment(editCtx, j.InstallationID, j.Owner, j.Repo, j.PendingCommentID,
+			err := r.gh.EditComment(editCtx, j.InstallationID, j.Owner, j.Repo, j.PendingCommentID,
 				"Interrupted by a restart — re-mention me or retry this job via `POST /jobs/retry/"+j.JobKey+"`.")
 			cancel()
+			if err != nil {
+				slog.Warn("reconcile: pending comment edit failed",
+					"job", rec.JobKey, "comment", j.PendingCommentID, "error", err)
+			}
 		}
 		slog.Info("reconciled stuck job", "job", rec.JobKey, "type", rec.Type)
 	}
