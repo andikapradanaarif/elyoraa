@@ -30,22 +30,53 @@ import (
 // be invisible to later runs.
 const inProgressMarker = "<!-- elyoraa-in-progress -->"
 
-// pendingBody returns the transient "in progress" comment for a job type.
-func pendingBody(j *domain.Review, budgetMinutes int) string {
+// queueFullBody is the terminal message left on a pending comment when a
+// job can't be queued at all — marked transient so conversation fetches
+// skip it like any other status comment.
+const queueFullBody = "Couldn't queue this run — the queue is full. Re-mention me to try again.\n\n" + inProgressMarker
+
+// pendingText returns the running-state status line for a job type.
+func pendingText(j *domain.Review, budgetMinutes int) string {
 	switch {
 	case j.IsRespond():
-		return "On it — reading the thread…\n\n" + inProgressMarker
+		return "On it — reading the thread…"
 	case j.IsGate():
-		return "Sizing up this PR…\n\n" + inProgressMarker
+		return "Sizing up this PR…"
 	case j.IsSplit():
 		return fmt.Sprintf(
-			"This PR looks too big for a single review (estimated ~%d min vs the %d min budget). Drafting a split proposal…\n\n%s",
+			"This PR looks too big for a single review (estimated ~%d min vs the %d min budget). Drafting a split proposal…",
+			j.SizeEstMinutes, budgetMinutes,
+		)
+	case j.IsIssue():
+		return "Analyzing issue…"
+	default:
+		return "Review in progress…"
+	}
+}
+
+// pendingBody returns the transient "in progress" comment for a job type.
+func pendingBody(j *domain.Review, budgetMinutes int) string {
+	return pendingText(j, budgetMinutes) + "\n\n" + inProgressMarker
+}
+
+// queuedBody returns the transient comment posted at enqueue. The job is
+// accepted but may wait behind running work, so the comment says "queued",
+// not "in progress" — Process flips it to pendingText on pickup.
+func queuedBody(j *domain.Review, budgetMinutes int) string {
+	switch {
+	case j.IsRespond():
+		return "On it — queued behind other work, I'll read the thread when a worker frees up…\n\n" + inProgressMarker
+	case j.IsGate():
+		return "Queued — I'll size up this PR when a worker frees up…\n\n" + inProgressMarker
+	case j.IsSplit():
+		return fmt.Sprintf(
+			"This PR looks too big for a single review (estimated ~%d min vs the %d min budget). Split proposal queued — I'll start when a worker frees up…\n\n%s",
 			j.SizeEstMinutes, budgetMinutes, inProgressMarker,
 		)
 	case j.IsIssue():
-		return "Analyzing issue…\n\n" + inProgressMarker
+		return "Issue analysis queued — I'll start when a worker frees up…\n\n" + inProgressMarker
 	default:
-		return "Review in progress…\n\n" + inProgressMarker
+		return "Review queued — I'll start when a worker frees up…\n\n" + inProgressMarker
 	}
 }
 
@@ -119,6 +150,10 @@ func (r *ReviewUsecase) Process(ctx context.Context, j domain.Review) (attempts 
 	if j.IsRespond() {
 		return r.processRespond(ctx, &j)
 	}
+
+	// A worker has the job — flip the enqueue-time "queued" comment to the
+	// running state so the PR reflects that work has actually started.
+	r.updatePending(ctx, &j, pendingText(&j, jobBudget(r.cfg, j)))
 
 	token, err := r.gh.InstallationToken(ctx, j.InstallationID)
 	if err != nil {
@@ -211,6 +246,7 @@ func (r *ReviewUsecase) Process(ctx context.Context, j domain.Review) (attempts 
 			j.Type = "split"
 			r.d.UpdateJob(j.JobKey, func(sj *domain.Review) { sj.Type = "split" })
 			r.annotatePhase(ctx, j.JobKey, "split")
+			r.updatePending(ctx, &j, pendingText(&j, jobBudget(r.cfg, j)))
 			return r.processOversize(ctx, &j, worktree, prInfo, refinedEstimate(prInfo, &j, r.cfg.PRLinesPerMinute, gen))
 		}
 		j.Type = "review"

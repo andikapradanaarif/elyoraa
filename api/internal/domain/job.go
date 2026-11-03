@@ -24,7 +24,7 @@ type Review struct {
 	TriggerAuthor      string   // login of the user whose comment/review/issue triggered this job
 	TriggerAssociation string   // webhook author_association of the trigger ("MEMBER", "NONE", …)
 	RepoAvailable      bool     // whether the repo was cloned and available for analysis
-	PendingCommentID   int64    // issue comment ID for "Review in progress…"
+	PendingCommentID   int64    // transient status comment: "queued…" at enqueue, "in progress…" on pickup
 	SplitCreate        bool     // split job: a human accepted the proposal — emit create_issues
 	Origin             string   // Origin* constant: how this job's intent was established
 	SizeEstMinutes     int      // estimated review effort at enqueue time

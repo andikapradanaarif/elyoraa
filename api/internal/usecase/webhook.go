@@ -740,11 +740,14 @@ func (u *WebhookUsecase) enqueueReview(ctx context.Context, review domain.Review
 		return domain.Review{}, ErrDuplicate
 	}
 
-	// Post the in-progress comment if we don't already have one.
+	// Post the queued comment if we don't already have one. It says
+	// "queued", not "in progress" — the job may wait behind running work
+	// for a while, and that wait should be visible. Process flips it to
+	// the running state on pickup.
 	if job.PendingCommentID == 0 {
 		pendingCtx, cancel := context.WithTimeout(context.Background(), u.cfg.CommentTimeout)
 		id, err := u.gh.PostPendingComment(pendingCtx, job.InstallationID, job.Owner, job.Repo, job.PRNumber,
-			pendingBody(job, jobBudget(u.cfg, *job)))
+			queuedBody(job, jobBudget(u.cfg, *job)))
 		cancel()
 		if err != nil {
 			slog.Warn("failed to post pending comment", "error", err)
@@ -757,8 +760,7 @@ func (u *WebhookUsecase) enqueueReview(ctx context.Context, review domain.Review
 		slog.Warn("queue full, dropping job", "job", job.JobKey)
 		if job.PendingCommentID != 0 {
 			editCtx, cancel := context.WithTimeout(context.Background(), u.cfg.CommentTimeout)
-			_ = u.gh.EditComment(editCtx, job.InstallationID, job.Owner, job.Repo, job.PendingCommentID,
-				"Review queued, will run later.\n\n<!-- elyoraa-in-progress -->")
+			_ = u.gh.EditComment(editCtx, job.InstallationID, job.Owner, job.Repo, job.PendingCommentID, queueFullBody)
 			cancel()
 		}
 		u.d.Done(*job)

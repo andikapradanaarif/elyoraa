@@ -231,7 +231,10 @@ func (r *ReviewUsecase) renderRespondPrompt(j *domain.Review, convo []Conversati
 func (r *ReviewUsecase) processRespond(ctx context.Context, j *domain.Review) (attempts int, err error) {
 	attempts = 1
 
-	if j.PendingCommentID == 0 {
+	if j.PendingCommentID != 0 {
+		// Flip the enqueue-time "queued" comment to the running state.
+		r.updatePending(ctx, j, pendingText(j, jobBudget(r.cfg, *j)))
+	} else {
 		pendingCtx, cancel := context.WithTimeout(context.Background(), r.cfg.CommentTimeout)
 		id, perr := r.gh.PostPendingComment(pendingCtx, j.InstallationID, j.Owner, j.Repo, j.PRNumber,
 			pendingBody(j, jobBudget(r.cfg, *j)))
@@ -531,7 +534,7 @@ func (r *ReviewUsecase) dispatchJob(ctx context.Context, parent *domain.Review, 
 	if started.PendingCommentID == 0 {
 		pendingCtx, cancel := context.WithTimeout(context.Background(), r.cfg.CommentTimeout)
 		id, err := r.gh.PostPendingComment(pendingCtx, job.InstallationID, job.Owner, job.Repo, job.PRNumber,
-			pendingBody(&job, jobBudget(r.cfg, job)))
+			queuedBody(&job, jobBudget(r.cfg, job)))
 		cancel()
 		if err == nil {
 			started.PendingCommentID = id
