@@ -84,14 +84,24 @@ func main() {
 	hostname, _ := os.Hostname()
 	instance := fmt.Sprintf("%s-%d-%d", hostname, os.Getpid(), time.Now().UnixNano())
 
+	// The queue lease is also the dedup orphan horizon: a job can't
+	// legitimately outlive it, so a claim older than it with no queue row
+	// belongs to a dead replica.
+	lease := cfg.QueueJobLease
+	if lease <= 0 {
+		// A job can't legitimately outlive its timeout; the lease covers
+		// that plus slack for cleanup so only a dead worker's row lapses.
+		lease = cfg.ReviewTimeout + 5*time.Minute
+	}
+
 	var d dedup.Interface
 	if cfg.QueueBackend == "postgres" {
-		d = dedup.NewPostgres(ctx, db, instance)
+		d = dedup.NewPostgres(ctx, db, instance, lease)
 	} else {
 		d = dedup.New()
 	}
 
-	qBackend, err := newQueueBackend(cfg, db, instance)
+	qBackend, err := newQueueBackend(cfg, db, instance, lease)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "queue backend: %v\n", err)
 		os.Exit(1)
@@ -168,17 +178,11 @@ func main() {
 	cancel()
 }
 
-func newQueueBackend(cfg *config.Config, db *pgxpool.Pool, instance string) (queue.Backend, error) {
+func newQueueBackend(cfg *config.Config, db *pgxpool.Pool, instance string, lease time.Duration) (queue.Backend, error) {
 	switch cfg.QueueBackend {
 	case "postgres":
 		if db == nil {
 			return nil, fmt.Errorf("QUEUE_BACKEND=postgres requires DATABASE_URL")
-		}
-		lease := cfg.QueueJobLease
-		if lease <= 0 {
-			// A job can't legitimately outlive its timeout; the lease covers
-			// that plus slack for cleanup so only a dead worker's row lapses.
-			lease = cfg.ReviewTimeout + 5*time.Minute
 		}
 		return queue.NewPostgresBackend(db, instance, lease), nil
 	case "file", "boltdb":

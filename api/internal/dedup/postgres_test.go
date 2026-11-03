@@ -46,8 +46,8 @@ func TestPostgresDedup_CrossInstanceSupersede(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	da := newPostgres(ctx, pool, "inst-A", 50*time.Millisecond)
-	db := newPostgres(ctx, pool, "inst-B", 50*time.Millisecond)
+	da := newPostgres(ctx, pool, "inst-A", 50*time.Millisecond, 0)
+	db := newPostgres(ctx, pool, "inst-B", 50*time.Millisecond, 0)
 
 	old := pgDedupJob("o/r/7/abc", "d-old", domain.OriginMentionKeyword)
 	jobCtx, _, ok := da.TryStart(ctx, old)
@@ -71,7 +71,7 @@ func TestPostgresDedup_CrossInstanceSupersede(t *testing.T) {
 // A redelivery carries the same delivery ID — never a supersede.
 func TestPostgresDedup_RedeliveryDropped(t *testing.T) {
 	pool := testPool(t)
-	d := NewPostgres(context.Background(), pool, "inst-A")
+	d := NewPostgres(context.Background(), pool, "inst-A", 0)
 
 	j := pgDedupJob("o/r/7/abc", "d-1", domain.OriginAccepted)
 	if _, _, ok := d.TryStart(context.Background(), j); !ok {
@@ -86,8 +86,8 @@ func TestPostgresDedup_RedeliveryDropped(t *testing.T) {
 func TestPostgresDedup_StaleDoneIsScoped(t *testing.T) {
 	pool := testPool(t)
 	ctx := context.Background()
-	da := NewPostgres(ctx, pool, "inst-A")
-	db := NewPostgres(ctx, pool, "inst-B")
+	da := NewPostgres(ctx, pool, "inst-A", 0)
+	db := NewPostgres(ctx, pool, "inst-B", 0)
 
 	old := pgDedupJob("o/r/7/abc", "d-old", domain.OriginMentionKeyword)
 	da.TryStart(ctx, old)
@@ -112,7 +112,7 @@ func TestPostgresDedup_SamePRSupersede(t *testing.T) {
 	pool := testPool(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	da := newPostgres(ctx, pool, "inst-A", 50*time.Millisecond)
+	da := newPostgres(ctx, pool, "inst-A", 50*time.Millisecond, 0)
 
 	old := pgDedupJob("o/r/7/sha-old", "d-1", domain.OriginMentionKeyword)
 	jobCtx, _, ok := da.TryStart(ctx, old)
@@ -134,7 +134,7 @@ func TestPostgresDedup_SamePRSupersede(t *testing.T) {
 func TestPostgresDedup_RespondDoesNotSweep(t *testing.T) {
 	pool := testPool(t)
 	ctx := context.Background()
-	d := NewPostgres(ctx, pool, "inst-A")
+	d := NewPostgres(ctx, pool, "inst-A", 0)
 
 	rev := pgDedupJob("o/r/7/abc", "d-1", domain.OriginMentionKeyword)
 	if _, _, ok := d.TryStart(ctx, rev); !ok {
@@ -158,8 +158,8 @@ func TestPostgresDedup_RespondDoesNotSweep(t *testing.T) {
 func TestPostgresDedup_BindCancelRejectsSuperseded(t *testing.T) {
 	pool := testPool(t)
 	ctx := context.Background()
-	da := NewPostgres(ctx, pool, "inst-A")
-	db := NewPostgres(ctx, pool, "inst-B")
+	da := NewPostgres(ctx, pool, "inst-A", 0)
+	db := NewPostgres(ctx, pool, "inst-B", 0)
 
 	old := pgDedupJob("o/r/7/abc", "d-old", domain.OriginMentionKeyword)
 	da.TryStart(ctx, old)
@@ -173,5 +173,60 @@ func TestPostgresDedup_BindCancelRejectsSuperseded(t *testing.T) {
 	// The new instance binds fine.
 	if !db.BindCancel(newer, func() {}) {
 		t.Fatal("current owner should bind")
+	}
+}
+
+// A claim left behind by a crashed replica (no queue row, never Done'd)
+// must not block same-intent re-mentions forever — the orphan sweep marks
+// it superseded so TryStart can reclaim the slot.
+func TestPostgresDedup_OrphanedClaimExpires(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+
+	dead := newPostgres(ctx, pool, "inst-dead", time.Hour, 0)
+	j := pgDedupJob("o/r/7/abc", "d-1", domain.OriginMentionKeyword)
+	if _, _, ok := dead.TryStart(ctx, j); !ok {
+		t.Fatal("initial claim")
+	}
+	// Simulate the crash: claim row exists, no queue row, Done never runs.
+
+	live := newPostgres(ctx, pool, "inst-live", time.Hour, time.Millisecond)
+	time.Sleep(5 * time.Millisecond) // age the claim past orphanAge
+	live.reconcile(ctx)
+
+	j2 := pgDedupJob("o/r/7/abc", "d-2", domain.OriginMentionKeyword)
+	if _, _, ok := live.TryStart(ctx, j2); !ok {
+		t.Fatal("orphaned claim must be reclaimable after the sweep")
+	}
+}
+
+// A claim whose queue row still exists is live work (queued or running on
+// some replica) — the sweep must not expire it even when it's old.
+func TestPostgresDedup_LiveClaimNotOrphaned(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+
+	d := newPostgres(ctx, pool, "inst-A", time.Hour, time.Millisecond)
+	j := pgDedupJob("o/r/7/abc", "d-1", domain.OriginMentionKeyword)
+	if _, _, ok := d.TryStart(ctx, j); !ok {
+		t.Fatal("initial claim")
+	}
+	// The matching queue row keeps the claim alive regardless of age.
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO job_queue (job_key, payload, status, enqueued_at)
+		 VALUES ($1, '{}', 'queued', now())`, j.JobKey); err != nil {
+		t.Fatalf("queue row: %v", err)
+	}
+
+	time.Sleep(5 * time.Millisecond)
+	d.reconcile(ctx)
+
+	var superseded bool
+	if err := pool.QueryRow(ctx,
+		`SELECT superseded FROM job_claims WHERE job_key = $1`, j.JobKey).Scan(&superseded); err != nil {
+		t.Fatalf("claim read: %v", err)
+	}
+	if superseded {
+		t.Fatal("claim with a live queue row must not be expired")
 	}
 }

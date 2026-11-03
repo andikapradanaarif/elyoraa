@@ -23,9 +23,10 @@ import (
 // Advisory locks serialize the claim decision per PR across replicas, so
 // two webhooks landing on different replicas can't both claim.
 type PostgresDedup struct {
-	pool     *pgxpool.Pool
-	instance string
-	poll     time.Duration
+	pool      *pgxpool.Pool
+	instance  string
+	poll      time.Duration
+	orphanAge time.Duration
 
 	mu      sync.Mutex
 	running map[string]*localState
@@ -37,16 +38,22 @@ type localState struct {
 }
 
 // NewPostgres creates the Postgres dedup. ctx bounds the watcher goroutine.
-func NewPostgres(ctx context.Context, pool *pgxpool.Pool, instance string) *PostgresDedup {
-	return newPostgres(ctx, pool, instance, time.Second)
+// orphanAge is how old a claim with no queue row must be before reconcile
+// expires it — pass the queue lease; <=0 uses a safe default.
+func NewPostgres(ctx context.Context, pool *pgxpool.Pool, instance string, orphanAge time.Duration) *PostgresDedup {
+	return newPostgres(ctx, pool, instance, time.Second, orphanAge)
 }
 
-func newPostgres(ctx context.Context, pool *pgxpool.Pool, instance string, poll time.Duration) *PostgresDedup {
+func newPostgres(ctx context.Context, pool *pgxpool.Pool, instance string, poll, orphanAge time.Duration) *PostgresDedup {
+	if orphanAge <= 0 {
+		orphanAge = time.Hour
+	}
 	d := &PostgresDedup{
-		pool:     pool,
-		instance: instance,
-		poll:     poll,
-		running:  make(map[string]*localState),
+		pool:      pool,
+		instance:  instance,
+		poll:      poll,
+		orphanAge: orphanAge,
+		running:   make(map[string]*localState),
 	}
 	go d.watch(ctx)
 	return d
@@ -348,6 +355,21 @@ func (d *PostgresDedup) reconcile(ctx context.Context) {
 			_, _ = d.pool.Exec(context.Background(),
 				`DELETE FROM job_claims WHERE job_key = $1 AND superseded`, key)
 		}
+	}
+
+	// A live claim with no queue row is orphaned — the owner died between
+	// TryStart and Submit, or the row was otherwise lost. While it sits
+	// there it drops every weaker-or-equal re-mention as a "duplicate", so
+	// expire it once it's clearly too old to be mid-enqueue. Marking
+	// superseded (not deleting) lets TryStart reclaim the slot; the sweep
+	// below removes the corpse.
+	if _, err := d.pool.Exec(ctx, `
+		UPDATE job_claims c SET superseded = true, superseded_at = now()
+		WHERE NOT c.superseded
+		  AND c.claimed_at < now() - $1 * interval '1 second'
+		  AND NOT EXISTS (SELECT 1 FROM job_queue q WHERE q.job_key = c.job_key)`,
+		d.orphanAge.Seconds()); err != nil && !errors.Is(err, context.Canceled) {
+		slog.Warn("dedup reconcile: orphan claim sweep", "error", err)
 	}
 
 	// Owners that crashed leave superseded rows behind; bound them.
