@@ -390,16 +390,16 @@ func (t *PostgresJobTracker) Get(ctx context.Context, key string) (JobRecord, bo
 		SELECT `+recordCols+` FROM job_records WHERE job_key = $1`, key))
 }
 
-// StuckProcessing returns 'processing' records with no live queue row — the
-// only records safe to fail at startup. A record whose queue row still
-// exists is owned by some replica (running now, or re-queued when its lease
-// expires) and must be left alone.
+// StuckProcessing returns 'processing'/'queued' records with no live queue
+// row — the only records safe to fail at startup. A record whose queue row
+// still exists is owned by some replica (running now, or re-queued when its
+// lease expires) and must be left alone.
 func (t *PostgresJobTracker) StuckProcessing(ctx context.Context) []JobRecord {
 	rows, err := t.pool.Query(ctx, `
 		SELECT `+recordCols+` FROM job_records r
-		WHERE r.status = $1
+		WHERE r.status IN ($1, $2)
 		  AND NOT EXISTS (SELECT 1 FROM job_queue q WHERE q.job_key = r.job_key)`,
-		JobStatusProcessing)
+		JobStatusProcessing, JobStatusQueued)
 	if err != nil {
 		return nil
 	}
