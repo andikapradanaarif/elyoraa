@@ -9,6 +9,10 @@ services:
     # variable at the previous SHA tag.
     image: ${ELYORAA_IMAGE:-elyoraa}
     container_name: elyoraa
+    # OOM kills arrive as SIGKILL — no drain runs. Without a restart policy
+    # the container stays down and every pending comment hangs until a human
+    # notices; restart it so killed work requeues and webhooks keep landing.
+    restart: unless-stopped
     # Grace for SHUTDOWN_DRAIN_TIMEOUT plus HTTP shutdown — the default 10s
     # would SIGKILL mid-review. Keep >= the drain timeout you configure
     # (drain defaults to REVIEW_TIMEOUT, 30m).
