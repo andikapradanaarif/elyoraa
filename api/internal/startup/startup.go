@@ -1,7 +1,6 @@
 package startup
 
 import (
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -23,10 +22,10 @@ func Check(cfg *config.Config) []CheckResult {
 	var results []CheckResult
 
 	results = append(results, checkBinary("git", "git"))
-	results = append(results, checkBinary("devin", cfg.DevinBin))
+	results = append(results, checkBinary("crush", cfg.CrushBin))
 	results = append(results, checkFile("github-app-private-key", cfg.GitHubAppPrivateKeyPath))
 	results = append(results, checkWritableDir("workspace", cfg.WorkspaceBase))
-	results = append(results, checkDevinConfigDir())
+	results = append(results, checkCrushConfigDir(cfg.CrushConfigDir))
 
 	return results
 }
@@ -88,25 +87,16 @@ func checkWritableDir(name, path string) CheckResult {
 	return CheckResult{Name: name, OK: true, Message: path}
 }
 
-func checkDevinConfigDir() CheckResult {
-	xdg := os.Getenv("XDG_CONFIG_HOME")
-	home := os.Getenv("HOME")
-	if xdg == "" && home == "" {
-		return CheckResult{Name: "devin-config-dir", OK: false, Message: "neither XDG_CONFIG_HOME nor HOME is set; Devin credentials cannot be loaded"}
-	}
-
-	base := xdg
-	if base == "" {
-		base = filepath.Join(home, ".config")
-	}
-	dir := filepath.Join(base, "devin")
+// Global Crush configuration may be mounted read-only; only auth data and
+// per-job state need writes. Create the conventional directory when absent.
+func checkCrushConfigDir(dir string) CheckResult {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return CheckResult{Name: "devin-config-dir", OK: false, Message: err.Error()}
+		return CheckResult{Name: "crush-config-dir", Message: err.Error()}
 	}
-	if _, err := os.ReadDir(dir); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return CheckResult{Name: "devin-config-dir", OK: false, Message: err.Error()}
+	if _, err := os.ReadDir(dir); err != nil {
+		return CheckResult{Name: "crush-config-dir", Message: err.Error()}
 	}
-	return CheckResult{Name: "devin-config-dir", OK: true, Message: dir}
+	return CheckResult{Name: "crush-config-dir", OK: true, Message: dir}
 }
 
 // LogResults logs each check at the appropriate level.

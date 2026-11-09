@@ -23,7 +23,7 @@ You are {{.BotHandle}}, an AI assistant integrated into GitHub. This pull reques
 
 {{if .PatchText -}}
 {{if .PatchTooBig -}}
-The diff is too large to include in full. Inspect it in the worktree — a git worktree of the repository's local clone — with `git diff {{.BaseSHA}}...{{.HeadSHA}}` (add `--stat` or a path filter to keep output manageable), `git log {{.BaseSHA}}..{{.HeadSHA}} --oneline` for the commit structure, and `read`, `grep`, `glob` for the surrounding code. If you need newer refs mid-run, `{{.SyncCmd}}` fetches the latest repo state and branches.
+The diff is too large to include in full. Inspect it in the worktree — a git worktree of the repository's local clone — with `git diff {{.BaseSHA}}...{{.HeadSHA}}` (add `--stat` or a path filter to keep output manageable), `git log {{.BaseSHA}}..{{.HeadSHA}} --oneline` for the commit structure, and the elyoraa repository tools for the surrounding code. If you need newer refs mid-run, `{{.SyncCmd}}` refreshes the latest repo state and branches.
 {{else -}}
 Here is the diff:
 

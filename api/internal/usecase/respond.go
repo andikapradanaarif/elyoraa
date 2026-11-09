@@ -225,7 +225,7 @@ func (r *ReviewUsecase) renderRespondPrompt(j *domain.Review, convo []Conversati
 }
 
 // processRespond handles a mention-routing job: read the discussion, let
-// Devin decide what the human wants, post the reply, then execute the
+// Crush decide what the human wants, post the reply, then execute the
 // declared actions. Actions run after the reply posts so the human sees a
 // fast answer first.
 func (r *ReviewUsecase) processRespond(ctx context.Context, j *domain.Review) (attempts int, err error) {
@@ -284,7 +284,7 @@ func (r *ReviewUsecase) processRespond(ctx context.Context, j *domain.Review) (a
 		return attempts, fmt.Errorf("render respond prompt: %w", err)
 	}
 
-	out, attempts, _, err := r.runDevin(ctx, j, workdir, prompt, validateRespondOutput)
+	out, attempts, _, err := r.runCrush(ctx, j, workdir, prompt, validateRespondOutput)
 	if err != nil {
 		if ctx.Err() == context.Canceled {
 			r.updatePending(context.Background(), j, "Mention cancelled.")
@@ -293,11 +293,11 @@ func (r *ReviewUsecase) processRespond(ctx context.Context, j *domain.Review) (a
 		}
 		r.postRespondReply(ctx, j,
 			"I couldn't process that — try `review`, `split`, or `create the issues` and I'll act on it directly.")
-		r.markFailed(ctx, *j, "run devin respond")
-		return attempts, fmt.Errorf("run devin respond: %w", err)
+		r.markFailed(ctx, *j, "run crush respond")
+		return attempts, fmt.Errorf("run crush respond: %w", err)
 	}
 
-	// A run superseded after runDevin returned must not post or act — the
+	// A run superseded after runCrush returned must not post or act — the
 	// newer mention owns the conversation now.
 	if ctx.Err() != nil {
 		r.updatePending(context.Background(), j, "Mention cancelled.")

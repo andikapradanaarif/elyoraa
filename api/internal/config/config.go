@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -17,10 +18,10 @@ type Config struct {
 	GitHubWebhookSecret     string
 	GitHubAppID             int64
 	GitHubAppPrivateKeyPath string
-	DevinBin                string
-	DevinConfigDir          string
-	DevinModel              string
-	DevinPermissionMode     string
+	CrushBin                string
+	CrushConfigDir          string
+	CrushModel              string
+	CrushDataDir            string
 	PromptsDir              string
 	BotHandle               string
 	TokenDir                string
@@ -44,22 +45,17 @@ type Config struct {
 	CommentTimeout        time.Duration
 	HTTPReadTimeout       time.Duration
 	HTTPWriteTimeout      time.Duration
-	DevinMaxRetries       int
-	DevinRetryBackoffs    []time.Duration
-	DevinAttemptTimeout   time.Duration
-	DevinPreflightCheck   bool
+	CrushMaxRetries       int
+	CrushRetryBackoffs    []time.Duration
+	CrushAttemptTimeout   time.Duration
+	CrushPreflightCheck   bool
 	MentionRouter         string        // "keywords" (default) or "agent"
 	SizeGateMode          string        // "deterministic" (default) or "agent"
-	RespondModel          string        // default DevinModel
+	RespondModel          string        // default CrushModel
 	RespondTimeout        time.Duration // default ReviewTimeout
 	RespondMaxActions     int
-	GateModel             string        // default RespondModel, then DevinModel
+	GateModel             string        // default RespondModel, then CrushModel
 	GateTimeout           time.Duration // triage-pass budget only; the job itself gets ReviewTimeout
-	// DevinSandbox runs every Devin invocation under the OS-level sandbox
-	// (--sandbox / autonomous mode), which enforces Read(...) deny rules for
-	// credentials even against shell commands. Requires bubblewrap+socat on
-	// Linux; Devin fails closed when the sandbox can't be set up.
-	DevinSandbox bool
 	// AdminToken protects /jobs* and the metrics path. When empty, those
 	// endpoints return 404.
 	AdminToken string
@@ -87,7 +83,7 @@ type Config struct {
 	// Override for GitHub Enterprise or file:// in tests.
 	GitBaseURL string
 	// GitAskpassPath is the GIT_ASKPASS helper script used for credentialed
-	// git operations — by the server's fetches and by the agent's repo-sync.
+	// git operations, including agent-requested repository refreshes.
 	GitAskpassPath string
 }
 
@@ -104,10 +100,10 @@ func Load() (*Config, error) {
 	cfg := &Config{
 		Port:                  getEnv("PORT", "8080"),
 		DatabaseURL:           os.Getenv("DATABASE_URL"),
-		DevinBin:              getEnv("DEVIN_BIN", "devin"),
-		DevinConfigDir:        getEnv("DEVIN_CONFIG_DIR", "/var/lib/elyoraa/devin-config"),
-		DevinModel:            getEnv("DEVIN_MODEL", "swe-2-high"),
-		DevinPermissionMode:   getEnv("DEVIN_PERMISSION_MODE", "dangerous"),
+		CrushBin:              getEnv("CRUSH_BIN", "crush"),
+		CrushConfigDir:        getEnv("CRUSH_CONFIG_DIR", crushConfigDir()),
+		CrushModel:            os.Getenv("CRUSH_MODEL"),
+		CrushDataDir:          getEnv("CRUSH_AUTH_DATA_DIR", crushDataDir()),
 		PromptsDir:            getEnv("PROMPTS_DIR", "/app/prompts"),
 		BotHandle:             getEnv("BOT_HANDLE", "elyoraa"),
 		TokenDir:              getEnv("ELYORAA_TOKEN_DIR", "/var/lib/elyoraa/tokens"),
@@ -129,10 +125,10 @@ func Load() (*Config, error) {
 		CommentTimeout:        getDuration("COMMENT_TIMEOUT", time.Minute),
 		HTTPReadTimeout:       getDuration("HTTP_READ_TIMEOUT", 10*time.Second),
 		HTTPWriteTimeout:      getDuration("HTTP_WRITE_TIMEOUT", 10*time.Second),
-		DevinMaxRetries:       getInt("DEVIN_MAX_RETRIES", 3),
-		DevinRetryBackoffs:    getDurationList("DEVIN_RETRY_BACKOFFS", []time.Duration{30 * time.Second, 2 * time.Minute, 5 * time.Minute}),
-		DevinAttemptTimeout:   getDuration("DEVIN_ATTEMPT_TIMEOUT", 0),
-		DevinPreflightCheck:   getBool("DEVIN_PREFLIGHT_CHECK", true),
+		CrushMaxRetries:       getInt("CRUSH_MAX_RETRIES", 3),
+		CrushRetryBackoffs:    getDurationList("CRUSH_RETRY_BACKOFFS", []time.Duration{30 * time.Second, 2 * time.Minute, 5 * time.Minute}),
+		CrushAttemptTimeout:   getDuration("CRUSH_ATTEMPT_TIMEOUT", 0),
+		CrushPreflightCheck:   getBool("CRUSH_PREFLIGHT_CHECK", true),
 		MentionRouter:         getEnv("MENTION_ROUTER", "keywords"),
 		SizeGateMode:          getEnv("SIZE_GATE_MODE", "deterministic"),
 		RespondModel:          getEnv("RESPOND_MODEL", ""),
@@ -140,7 +136,6 @@ func Load() (*Config, error) {
 		RespondMaxActions:     getInt("RESPOND_MAX_ACTIONS", 4),
 		GateModel:             getEnv("GATE_MODEL", ""),
 		GateTimeout:           getDuration("GATE_TIMEOUT", 5*time.Minute),
-		DevinSandbox:          getBool("DEVIN_SANDBOX", true),
 		AdminToken:            os.Getenv("ADMIN_TOKEN"),
 		MentionRateLimit:      getInt("MENTION_RATE_LIMIT", 20),
 		MentionRateWindow:     getDuration("MENTION_RATE_WINDOW", time.Hour),
@@ -285,4 +280,26 @@ func getBool(key string, def bool) bool {
 		return def
 	}
 	return b
+}
+
+// Crush keeps provider settings in both the user config and data directories.
+func crushConfigDir() string {
+	if dir := os.Getenv("CRUSH_GLOBAL_CONFIG"); dir != "" {
+		return dir
+	}
+	if dir := os.Getenv("XDG_CONFIG_HOME"); dir != "" {
+		return filepath.Join(dir, "crush")
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".config", "crush")
+}
+func crushDataDir() string {
+	if dir := os.Getenv("CRUSH_GLOBAL_DATA"); dir != "" {
+		return dir
+	}
+	if dir := os.Getenv("XDG_DATA_HOME"); dir != "" {
+		return filepath.Join(dir, "crush")
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".local", "share", "crush")
 }

@@ -24,12 +24,11 @@ services:
       # Clone repos to {WORKSPACE_HOST_PATH}/{owner}/{repo}.git on the host.
       # Must be an absolute path (no ~) — especially when running with sudo.
       - ${WORKSPACE_HOST_PATH:?WORKSPACE_HOST_PATH must be set in .env}:/var/lib/elyoraa/workspace
-      # Bind-mount the host's Devin credentials so the CLI is authenticated.
+      # Bind-mount the host's trusted Crush configuration so the CLI is authenticated.
       # Must be an absolute path (no ~).
-      - ${DEVIN_CREDS_HOST_PATH:?DEVIN_CREDS_HOST_PATH must be set in .env}:/home/elyoraa/.config/devin
-      # Devin stores auth tokens in ~/.local/share/devin/credentials.toml
-      - ${DEVIN_DATA_HOST_PATH:?DEVIN_DATA_HOST_PATH must be set in .env}:/home/elyoraa/.local/share/devin
-      - devin-config:/var/lib/elyoraa/devin-config
+      - ${CRUSH_CONFIG_HOST_PATH:?CRUSH_CONFIG_HOST_PATH must be set in .env}:/home/elyoraa/.config/crush
+      # Crush persists provider credentials and selected models in its data directory.
+      - ${CRUSH_DATA_HOST_PATH:?CRUSH_DATA_HOST_PATH must be set in .env}:/home/elyoraa/.local/share/crush
       # Queue + job-record persistence (QUEUE_BACKEND=file). Queued jobs and
       # outcomes survive restarts/deploys.
       - queue-data:/var/lib/elyoraa/queue
@@ -38,10 +37,6 @@ services:
       - github-app-private-key
     tmpfs:
       - /tmp/elyoraa
-    cap_add:
-      - SYS_ADMIN # required for bubblewrap user namespaces
-    security_opt:
-      - "seccomp:unconfined"
 
   # Optional Postgres for QUEUE_BACKEND=postgres (multi-replica / HA mode).
   # Enable with: docker compose --profile db up -d
@@ -63,7 +58,6 @@ services:
       retries: 10
 
 volumes:
-  devin-config:
   queue-data:
   pg-data:
 

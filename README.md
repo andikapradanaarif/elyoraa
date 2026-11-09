@@ -1,6 +1,6 @@
 # elyoraa
 
-AI PR Reviewer — a Go engine that receives GitHub `pull_request` webhooks and reviews each PR with the Devin CLI in a sandboxed worktree.
+AI PR Reviewer — a Go engine that receives GitHub `pull_request` webhooks and reviews each PR with the Crush CLI using bounded repository tools.
 
 - **Architecture:** see [`docs/plan/GIT_AI_REVIEWER.md`](docs/plan/GIT_AI_REVIEWER.md).
 - **Implementation:** see [`api/README.md`](api/README.md).
@@ -13,7 +13,7 @@ Phase 1 MVP is implemented under `api/`:
 - In-memory review queue with worker panic recovery.
 - Bare-clone cache + per-review worktrees.
 - GitHub App auth, webhook verification, PR fetch, and review posting.
-- Prompt rendering, Devin CLI runner, and JSON output parser.
+- Prompt rendering, Crush CLI runner, and JSON output parser.
 - Prometheus-style `/metrics`, `/health`, and `/webhook` endpoints; `GET /jobs` lists job outcomes and `POST /jobs/retry/{key}` re-enqueues a failed review.
 - Optional PostgreSQL webhook audit log.
 - Optional BoltDB-backed queue (`QUEUE_BACKEND=file`).

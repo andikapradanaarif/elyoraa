@@ -1,3 +1,5 @@
+> Runtime update: elyoraa now uses the installed [Crush fork](https://github.com/andikapradanaarif/crush). The historical Devin CLI/config/sandbox details below are superseded by [the current runtime notes](../../api/README.md#crush-runtime).
+
 # Chat + Deploy Engine Plan
 
 ## Summary

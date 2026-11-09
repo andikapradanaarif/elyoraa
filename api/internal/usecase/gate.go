@@ -32,7 +32,7 @@ func (r *ReviewUsecase) triageGate(ctx context.Context, j *domain.Review, worktr
 	}
 
 	tctx, tcancel := context.WithTimeout(ctx, r.cfg.GateTimeout)
-	out, _, _, err := r.runDevin(tctx, j, worktree, prompt, validateGateOutput)
+	out, _, _, err := r.runCrush(tctx, j, worktree, prompt, validateGateOutput)
 	tcancel()
 	if err != nil {
 		if ctx.Err() != nil {

@@ -52,7 +52,7 @@ The comment that invoked you:
 {{if .RepoAvailable}}
 ## Repository
 
-A git worktree of the repository's local clone is available in the working directory. You may read files and run `git` commands (`diff`, `log`, `show`, `status`, `ls-files`, `checkout`, `branch`) to answer questions accurately — e.g. to check whether a proposed split is still accurate against the current head. The clone is refreshed when your session starts; if you need newer refs mid-run, run `{{.SyncCmd}}` to fetch the latest repo state and branches.
+The repository tools access a git worktree of the repository's local clone. You may read files and run `git` commands via `mcp_elyoraa_git` (`diff`, `log`, `show`, `status`, `ls-files`) to answer questions accurately — e.g. to check whether a proposed split is still accurate against the current head. The clone is refreshed when your session starts; if you need newer refs mid-run, call `{{.SyncCmd}}` to fetch the latest repo state and branches.
 {{else}}
 ## Repository
 

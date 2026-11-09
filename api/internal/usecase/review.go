@@ -286,16 +286,16 @@ func (r *ReviewUsecase) Process(ctx context.Context, j domain.Review) (attempts 
 		return attempts, fmt.Errorf("render prompt: %w", err)
 	}
 
-	out, attempts, lastDur, err := r.runDevin(ctx, &j, worktree, prompt, validateReviewOutput)
+	out, attempts, lastDur, err := r.runCrush(ctx, &j, worktree, prompt, validateReviewOutput)
 	if err != nil {
 		if ctx.Err() == context.Canceled {
 			r.updatePending(context.Background(), &j, "Review cancelled: a newer push replaced this one.")
 			r.markStatus(ctx, j, "cancelled")
 			return attempts, queue.ErrJobCancelled
 		}
-		r.updatePending(ctx, &j, "Review failed: Devin review run failed.")
-		r.markFailed(ctx, j, "run devin")
-		return attempts, fmt.Errorf("run devin: %w", err)
+		r.updatePending(ctx, &j, "Review failed: Crush review run failed.")
+		r.markFailed(ctx, j, "run crush")
+		return attempts, fmt.Errorf("run crush: %w", err)
 	}
 	if r.tracker != nil && lastDur > 0 {
 		r.tracker.Annotate(ctx, j.JobKey, queue.JobAnnotation{AttemptSeconds: int64(lastDur.Seconds())})
@@ -303,9 +303,9 @@ func (r *ReviewUsecase) Process(ctx context.Context, j domain.Review) (attempts 
 
 	review, err := parseReviewOutput(out)
 	if err != nil {
-		// Should not happen — runDevin validates the output — but never
+		// Should not happen — runCrush validates the output — but never
 		// approve on a parse failure.
-		r.updatePending(ctx, &j, "Review failed: could not parse Devin output.")
+		r.updatePending(ctx, &j, "Review failed: could not parse Crush output.")
 		r.markFailed(ctx, j, "parse output")
 		return attempts, fmt.Errorf("parse output: %w", err)
 	}
@@ -388,7 +388,7 @@ func (r *ReviewUsecase) Process(ctx context.Context, j domain.Review) (attempts 
 
 	if err := r.gh.PostReview(ctx, j.InstallationID, j.Owner, j.Repo, j.PRNumber, summary, fileComments, j.HeadSHA, state); err != nil {
 		// GitHub rejects approving your own PR. If the PR was authored by a bot
-		// (e.g. elyoraa[bot]/Devin), fall back to posting a comment instead.
+		// (e.g. elyoraa[bot]/Crush), fall back to posting a comment instead.
 		if j.IsBot() && state == "APPROVE" {
 			slog.Info("cannot approve own PR, posting comment instead", "author", j.Author)
 			commentBody := "✅ **Review complete — no issues found.**\n\n" + summary
@@ -423,9 +423,9 @@ func (r *ReviewUsecase) markFailed(ctx context.Context, j domain.Review, msg str
 	}
 }
 
-// processIssue handles an issue analysis job: spawn Devin to analyze the issue
+// processIssue handles an issue analysis job: spawn Crush to analyze the issue
 // and post the response as a comment. If the repo is cloned on the server,
-// Devin gets a worktree so it can search the code. If not, Devin analyzes
+// Crush gets a worktree so it can search the code. If not, Crush analyzes
 // from the issue text alone and mentions that the repo isn't available.
 func (r *ReviewUsecase) processIssue(ctx context.Context, j *domain.Review) (attempts int, err error) {
 	attempts = 1
@@ -445,8 +445,8 @@ func (r *ReviewUsecase) processIssue(ctx context.Context, j *domain.Review) (att
 		}
 	}
 
-	// Try to get a worktree so Devin can search the repo code.
-	// If the repo isn't cloned, fall back to a temp dir and tell Devin.
+	// Try to get a worktree so Crush can search the repo code.
+	// If the repo isn't cloned, fall back to a temp dir and tell Crush.
 	workdir := ""
 	var cleanup func()
 	repoAvailable := false
@@ -489,19 +489,19 @@ func (r *ReviewUsecase) processIssue(ctx context.Context, j *domain.Review) (att
 		return attempts, fmt.Errorf("render issue prompt: %w", err)
 	}
 
-	out, attempts, _, err := r.runDevin(ctx, j, workdir, prompt, nil)
+	out, attempts, _, err := r.runCrush(ctx, j, workdir, prompt, nil)
 	if err != nil {
 		if ctx.Err() == context.Canceled {
 			r.updatePending(context.Background(), j, "Issue analysis cancelled.")
 			r.markStatus(ctx, *j, "cancelled")
 			return attempts, queue.ErrJobCancelled
 		}
-		r.updatePending(ctx, j, "Issue analysis failed: Devin run failed.")
-		r.markFailed(ctx, *j, "run devin issue")
-		return attempts, fmt.Errorf("run devin issue: %w", err)
+		r.updatePending(ctx, j, "Issue analysis failed: Crush run failed.")
+		r.markFailed(ctx, *j, "run crush issue")
+		return attempts, fmt.Errorf("run crush issue: %w", err)
 	}
 
-	// Post the analysis as an issue comment. If Devin appended a create_issues
+	// Post the analysis as an issue comment. If Crush appended a create_issues
 	// action block (i.e. a human accepted a proposed breakdown), create the
 	// issues and link them under the reply.
 	response := strings.TrimSpace(out)
@@ -569,7 +569,7 @@ func (r *ReviewUsecase) renderIssuePrompt(j *domain.Review, thread []Conversatio
 	return buf.String(), nil
 }
 
-// issueActions is the optional JSON action block Devin appends to an issue
+// issueActions is the optional JSON action block Crush appends to an issue
 // reply when a human has accepted a proposed breakdown.
 type issueActions struct {
 	CreateIssues []domain.ProposedIssue `json:"create_issues"`
@@ -578,7 +578,7 @@ type issueActions struct {
 // maxCreatedIssues bounds how many issues one job may create.
 const maxCreatedIssues = 10
 
-// parseIssueActions extracts a trailing ```json action block from Devin's
+// parseIssueActions extracts a trailing ```json action block from Crush's
 // reply, returning the actions and the reply text with the block removed.
 // Any well-formed actions block is stripped — even an empty create_issues —
 // so protocol JSON never leaks into the posted reply.
@@ -662,10 +662,10 @@ func (r *ReviewUsecase) annotatePhase(ctx context.Context, key, typ string) {
 }
 
 // processOversize handles a PR that exceeds the review-time budget. Instead
-// of a full review it runs a single Devin pass that analyzes the diff and
+// of a full review it runs a single Crush pass that analyzes the diff and
 // proposes how to split the PR into smaller, reviewable pieces — posted as
 // the pending comment. When j.SplitCreate is set (a human accepted a previous
-// proposal) Devin may emit a create_issues block, which is turned into real
+// proposal) Crush may emit a create_issues block, which is turned into real
 // GitHub issues like processIssue does.
 func (r *ReviewUsecase) processOversize(ctx context.Context, j *domain.Review, worktree string, prInfo *github.PRInfo, size prSize) (attempts int, err error) {
 	attempts = 1
@@ -686,16 +686,16 @@ func (r *ReviewUsecase) processOversize(ctx context.Context, j *domain.Review, w
 		return attempts, fmt.Errorf("render split prompt: %w", err)
 	}
 
-	out, attempts, _, err := r.runDevin(ctx, j, worktree, prompt, validateSplitOutput)
+	out, attempts, _, err := r.runCrush(ctx, j, worktree, prompt, validateSplitOutput)
 	if err != nil {
 		if ctx.Err() == context.Canceled {
 			r.updatePending(context.Background(), j, "Review cancelled: a newer push replaced this one.")
 			r.markStatus(ctx, *j, "cancelled")
 			return attempts, queue.ErrJobCancelled
 		}
-		r.updatePending(ctx, j, "Split analysis failed: Devin run failed.")
-		r.markFailed(ctx, *j, "run devin split")
-		return attempts, fmt.Errorf("run devin split: %w", err)
+		r.updatePending(ctx, j, "Split analysis failed: Crush run failed.")
+		r.markFailed(ctx, *j, "run crush split")
+		return attempts, fmt.Errorf("run crush split: %w", err)
 	}
 
 	response := strings.TrimSpace(out)
@@ -875,11 +875,11 @@ func (r *ReviewUsecase) renderPrompt(j *domain.Review, prInfo *github.PRInfo) (s
 // maxOutputLogBytes caps how much subprocess output is written to logs.
 const maxOutputLogBytes = 8192
 
-// devinPreflightTimeout bounds the `devin models list` check so a hung CLI
+// crushPreflightTimeout bounds the CLI version check so a hung CLI
 // doesn't consume the whole attempt budget.
-const devinPreflightTimeout = 60 * time.Second
+const crushPreflightTimeout = 60 * time.Second
 
-// runDevin invokes the Devin CLI, retrying transient failures with exponential
+// runCrush invokes the Crush CLI, retrying transient failures with exponential
 // backoff. When validate is non-nil, a zero-exit run whose output fails
 // validation is retried as a transient failure — a malformed response must
 // never silently reach the caller (e.g. an unparseable review approving a PR).
@@ -888,52 +888,40 @@ const devinPreflightTimeout = 60 * time.Second
 // The lastDuration return is the final attempt's wall time (preflight +
 // exec), recorded for calibration — pickup→finish includes retry backoffs
 // that would otherwise depress the measured lines-per-minute rate.
-func (r *ReviewUsecase) runDevin(ctx context.Context, j *domain.Review, worktree, prompt string, validate func(string) error) (string, int, time.Duration, error) {
+func (r *ReviewUsecase) runCrush(ctx context.Context, j *domain.Review, worktree, prompt string, validate func(string) error) (string, int, time.Duration, error) {
 	tmpDir, err := os.MkdirTemp("", "elyoraa-review-*")
 	if err != nil {
 		return "", 0, 0, err
 	}
 	defer os.RemoveAll(tmpDir)
 
-	promptFile := filepath.Join(tmpDir, "prompt.md")
-	if err := os.WriteFile(promptFile, []byte(prompt), 0o644); err != nil {
+	// Run from a trusted, per-job directory. Never let Crush load a PR's
+	// crush.json/crushrc (which can execute code during configuration).
+	repo, err := startCrushRepo(ctx, worktree, func(syncCtx context.Context) error {
+		if r.gh == nil || r.cache == nil {
+			return errors.New("repository sync unavailable")
+		}
+		token, err := r.gh.InstallationToken(syncCtx, j.InstallationID)
+		if err != nil {
+			return err
+		}
+		return r.cache.Fetch(syncCtx, j.Owner, j.Repo, token)
+	})
+	if err != nil {
 		return "", 0, 0, err
 	}
-
-	// Credentials for agent-run git: the token file lives in the deny-listed
-	// token dir so sandboxed commands cannot read it — only the excluded
-	// repo-sync helper consumes it (via the host-locked askpass). Best-effort:
-	// a token failure must not block the run itself.
-	tokenFile := ""
-	if r.gh != nil && r.cache != nil {
-		if tok, terr := r.gh.InstallationToken(ctx, j.InstallationID); terr != nil {
-			slog.Warn("devin run without git credentials: token mint failed", "job", j.JobKey, "error", terr)
-		} else if tf, cleanupToken, werr := r.cache.WriteTokenFile(tok); werr != nil {
-			slog.Warn("devin run without git credentials: token file", "job", j.JobKey, "error", werr)
-		} else {
-			tokenFile = tf
-			defer cleanupToken()
-		}
+	defer repo.Close()
+	if err := writeCrushConfig(tmpDir, repo); err != nil {
+		return "", 0, 0, err
 	}
-
 	model := r.jobModel(j)
-	args := []string{
-		"-p",
-		"--model", model,
-		"--config", filepath.Join(r.cfg.DevinConfigDir, "devin-config.json"),
-		"--respect-workspace-trust", "false",
-		"--prompt-file", promptFile,
+	args := []string{"run", "--quiet"}
+	if model != "" {
+		args = append(args, "--model", model)
 	}
-	if r.cfg.DevinSandbox {
-		// Autonomous is the only permission mode under --sandbox; the sandbox
-		// enforces Read(...) deny rules at the OS level so credentials stay
-		// hidden even from shell commands.
-		args = append([]string{"--sandbox"}, args...)
-	} else {
-		args = append(args, "--permission-mode", r.cfg.DevinPermissionMode)
-	}
+	prompt = "Repository access is through the elyoraa MCP tools only: read_file, list_files, search, git (read-only argv, without a shell), and sync. Paths are relative to the repository worktree. Use these tools to inspect code and history. Shell execution, edits, and direct network access are unavailable.\n\n" + prompt
 
-	maxRetries := r.cfg.DevinMaxRetries
+	maxRetries := r.cfg.CrushMaxRetries
 	if maxRetries < 0 {
 		maxRetries = 0
 	}
@@ -948,20 +936,20 @@ func (r *ReviewUsecase) runDevin(ctx context.Context, j *domain.Review, worktree
 		transient := true
 		reason := "preflight"
 
-		if r.cfg.DevinPreflightCheck {
-			if perr := r.devinPreflight(attemptCtx, worktree, model); perr != nil {
-				runErr = fmt.Errorf("devin preflight: %w", perr)
-				if rsn, det := deterministicDevinReason(runErr, runErr.Error()); det {
+		if r.cfg.CrushPreflightCheck {
+			if perr := r.crushPreflight(attemptCtx, tmpDir); perr != nil {
+				runErr = fmt.Errorf("crush preflight: %w", perr)
+				if rsn, det := deterministicCrushReason(runErr, runErr.Error()); det {
 					transient, reason = false, rsn
 				}
 			}
 		}
 		if runErr == nil {
-			log.Info("devin run started")
-			out, runErr = r.execDevin(attemptCtx, worktree, args, tmpDir, tokenFile)
+			log.Info("crush run started")
+			out, runErr = r.execCrush(attemptCtx, tmpDir, args, prompt, attempt)
 			switch {
 			case runErr != nil:
-				transient, reason = classifyDevinError(runErr, attemptCtx, out)
+				transient, reason = classifyCrushError(runErr, attemptCtx, out)
 			case validate != nil:
 				if verr := validate(out); verr != nil {
 					runErr, transient, reason = verr, true, "malformed output"
@@ -977,78 +965,72 @@ func (r *ReviewUsecase) runDevin(ctx context.Context, j *domain.Review, worktree
 		tail := tailString(out, maxOutputLogBytes)
 		if !transient || attempt > maxRetries || ctx.Err() != nil {
 			if reason == "canceled" {
-				log.Info("devin run canceled", "output", tail)
+				log.Info("crush run canceled", "output", tail)
 			} else {
-				log.Error("devin run failed", "error", runErr, "transient", transient, "reason", reason, "output", tail)
+				log.Error("crush run failed", "error", runErr, "transient", transient, "reason", reason, "output", tail)
 			}
 			return out, attempt, time.Since(attemptStart), runErr
 		}
 
 		wait := r.backoff(attempt)
-		log.Warn("devin attempt failed, will retry", "error", runErr, "reason", reason, "output", tail, "retry_in", wait.String())
+		log.Warn("crush attempt failed, will retry", "error", runErr, "reason", reason, "output", tail, "retry_in", wait.String())
 		if !sleepCtx(ctx, wait) {
 			return "", attempt, 0, ctx.Err()
 		}
 	}
 }
 
-// devinPreflight verifies the devin binary is usable: `devin models list` must
-// succeed and list the model this job will run with.
-func (r *ReviewUsecase) devinPreflight(ctx context.Context, worktree, model string) error {
-	pfCtx, cancel := context.WithTimeout(ctx, devinPreflightTimeout)
+// crushPreflight checks the installed fork without loading untrusted config.
+// Provider/model authentication is validated by the run itself; `crush models`
+// also lists unconfigured providers and cannot establish credential validity.
+func (r *ReviewUsecase) crushPreflight(ctx context.Context, dir string) error {
+	pfCtx, cancel := context.WithTimeout(ctx, crushPreflightTimeout)
 	defer cancel()
-
-	cmd := exec.CommandContext(pfCtx, r.cfg.DevinBin, "models", "list")
-	cmd.Dir = worktree
-	// A leaked subprocess inheriting the pipe must not hold Wait past the
-	// timeout — bound the post-kill drain.
-	cmd.WaitDelay = 30 * time.Second
+	cmd := r.crushCommand(pfCtx, dir, []string{"--version"}, 0)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		if pfCtx.Err() == context.DeadlineExceeded {
-			return fmt.Errorf("models list timed out")
-		}
-		return fmt.Errorf("models list: %w: %s", err, tailString(string(out), 2048))
-	}
-	if model != "" && !strings.Contains(string(out), model) {
-		return fmt.Errorf("configured model %q not present in `devin models list` output", model)
+		return fmt.Errorf("crush --version: %w: %s", err, tailString(string(out), 2048))
 	}
 	return nil
 }
 
-// execDevin runs the devin subprocess once and returns its combined output.
-// The environment carries the git credential plumbing the agent-side
-// repo-sync helper consumes — the token file itself is deny-hidden inside
-// the sandbox, and GIT_TERMINAL_PROMPT=0 turns any sandboxed credentialed
-// git operation (which cannot succeed) into a fast failure instead of a
-// blocked prompt.
-func (r *ReviewUsecase) execDevin(ctx context.Context, worktree string, args []string, tmpDir, tokenFile string) (string, error) {
-	cmd := exec.CommandContext(ctx, r.cfg.DevinBin, args...)
-	cmd.Dir = worktree
-	// CommandContext kills only the direct child; a leaked grandchild
-	// inheriting stdout would otherwise keep CombinedOutput blocked past
-	// the attempt timeout. WaitDelay forcibly closes the pipes.
-	cmd.WaitDelay = 30 * time.Second
-	env := os.Environ()
-	env = append(env,
-		"XDG_CACHE_HOME="+tmpDir,
-		"TMPDIR="+tmpDir,
-		"GIT_TERMINAL_PROMPT=0",
-		"GIT_ASKPASS="+r.cfg.GitAskpassPath,
-		"ELYORAA_GIT_HOST="+cache.GitHost(r.cfg.GitBaseURL),
-		"ELYORAA_WORKSPACE_BASE="+r.cfg.WorkspaceBase,
-	)
-	if tokenFile != "" {
-		env = append(env, "ELYORAA_GIT_TOKEN_FILE="+tokenFile)
+// execCrush sends the prompt on stdin and parses stdout alone: diagnostics on
+// stderr must never be mistaken for an agent's JSON review or action block.
+func (r *ReviewUsecase) execCrush(ctx context.Context, dir string, args []string, prompt string, attempt int) (string, error) {
+	cmd := r.crushCommand(ctx, dir, args, attempt)
+	cmd.Stdin = strings.NewReader(prompt)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	err := cmd.Run()
+	if err != nil {
+		return stderr.String() + "\n" + stdout.String(), err
 	}
-	cmd.Env = env
-
-	out, err := cmd.CombinedOutput()
-	return string(out), err
+	return stdout.String(), nil
 }
 
-// jobModel returns the Devin model for this job type: dedicated lighter
-// models may handle routing/triage while reviews keep DEVIN_MODEL.
+func (r *ReviewUsecase) crushCommand(ctx context.Context, dir string, args []string, attempt int) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, r.cfg.CrushBin, args...)
+	cmd.Dir = dir
+	cmd.WaitDelay = 30 * time.Second
+	// The model provider may need environment credentials. Repository tools run
+	// in Go and never expose this environment or the trusted Crush configuration.
+	cmd.Env = append(os.Environ(),
+		"CRUSH_GLOBAL_CONFIG="+r.cfg.CrushConfigDir,
+		"CRUSH_GLOBAL_DATA="+r.cfg.CrushDataDir,
+		"CRUSH_DATA_DIR="+filepath.Join(dir, fmt.Sprintf("attempt-%d", attempt)),
+		"CRUSH_CLIENT_SERVER=false",
+		"CRUSH_DISABLE_METRICS=1",
+		"CRUSH_DISABLE_PROVIDER_AUTO_UPDATE=1",
+		"CRUSH_SKILLS_DIR="+filepath.Join(dir, "skills"),
+		"XDG_CACHE_HOME="+dir,
+		"TMPDIR="+dir,
+		"GIT_TERMINAL_PROMPT=0",
+	)
+	return cmd
+}
+
+// jobModel returns the Crush model for this job type: dedicated lighter
+// models may handle routing/triage while reviews keep CRUSH_MODEL.
 func (r *ReviewUsecase) jobModel(j *domain.Review) string {
 	switch {
 	case j.IsRespond():
@@ -1063,7 +1045,7 @@ func (r *ReviewUsecase) jobModel(j *domain.Review) string {
 			return r.cfg.RespondModel
 		}
 	}
-	return r.cfg.DevinModel
+	return r.cfg.CrushModel
 }
 
 // jobTimeout returns the overall processing budget for this job type.
@@ -1078,17 +1060,17 @@ func (r *ReviewUsecase) jobTimeout(j *domain.Review) time.Duration {
 }
 
 // attemptTimeout returns the per-attempt timeout; defaults to the job's
-// overall timeout when DEVIN_ATTEMPT_TIMEOUT is unset.
+// overall timeout when CRUSH_ATTEMPT_TIMEOUT is unset.
 func (r *ReviewUsecase) attemptTimeout(j *domain.Review) time.Duration {
-	if r.cfg.DevinAttemptTimeout > 0 {
-		return r.cfg.DevinAttemptTimeout
+	if r.cfg.CrushAttemptTimeout > 0 {
+		return r.cfg.CrushAttemptTimeout
 	}
 	return r.jobTimeout(j)
 }
 
 // backoff returns the wait before retry attempt n (1-indexed).
 func (r *ReviewUsecase) backoff(retry int) time.Duration {
-	bs := r.cfg.DevinRetryBackoffs
+	bs := r.cfg.CrushRetryBackoffs
 	if len(bs) == 0 {
 		return 30 * time.Second
 	}
@@ -1110,12 +1092,12 @@ func (r *ReviewUsecase) jobLogger(j *domain.Review, attempt int, workdir string,
 		"attempt", attempt,
 		"model", model,
 		"workdir", workdir,
-		"argv", redactArgs(r.cfg.DevinBin, args),
+		"argv", redactArgs(r.cfg.CrushBin, args),
 	)
 }
 
-// Error substrings that mark a devin failure as deterministic (not retriable).
-var devinDeterministicPatterns = []string{
+// Error substrings that mark a crush failure as deterministic (not retriable).
+var crushDeterministicPatterns = []string{
 	"untrusted workspace",
 	"workspace trust",
 	"unauthorized",
@@ -1130,8 +1112,8 @@ var devinDeterministicPatterns = []string{
 	"no such file or directory",
 }
 
-// Error substrings that mark a devin failure as transient (retriable).
-var devinTransientPatterns = []string{
+// Error substrings that mark a crush failure as transient (retriable).
+var crushTransientPatterns = []string{
 	"unknown model",
 	"no models",
 	"empty model",
@@ -1158,9 +1140,9 @@ var devinTransientPatterns = []string{
 	"dial tcp",
 }
 
-// deterministicDevinReason reports whether err/text marks a deterministic
-// (non-retriable) devin failure, returning a short reason when it does.
-func deterministicDevinReason(err error, text string) (string, bool) {
+// deterministicCrushReason reports whether err/text marks a deterministic
+// (non-retriable) crush failure, returning a short reason when it does.
+func deterministicCrushReason(err error, text string) (string, bool) {
 	if errors.Is(err, context.Canceled) {
 		return "canceled", true
 	}
@@ -1168,7 +1150,7 @@ func deterministicDevinReason(err error, text string) (string, bool) {
 		return "binary not found", true
 	}
 	lower := strings.ToLower(text)
-	for _, p := range devinDeterministicPatterns {
+	for _, p := range crushDeterministicPatterns {
 		if strings.Contains(lower, p) {
 			return "deterministic: " + p, true
 		}
@@ -1176,9 +1158,9 @@ func deterministicDevinReason(err error, text string) (string, bool) {
 	return "", false
 }
 
-// classifyDevinError reports whether a devin subprocess failure looks
+// classifyCrushError reports whether a crush subprocess failure looks
 // transient (worth retrying) or deterministic. attemptCtx must still be live.
-func classifyDevinError(err error, attemptCtx context.Context, out string) (bool, string) {
+func classifyCrushError(err error, attemptCtx context.Context, out string) (bool, string) {
 	if attemptCtx.Err() == context.DeadlineExceeded {
 		return true, "attempt timeout"
 	}
@@ -1192,12 +1174,12 @@ func classifyDevinError(err error, attemptCtx context.Context, out string) (bool
 		// retry path as malformed output.
 		return true, exitErr.ProcessState.String()
 	}
-	if rsn, det := deterministicDevinReason(err, out); det {
+	if rsn, det := deterministicCrushReason(err, out); det {
 		return false, rsn
 	}
 
 	lower := strings.ToLower(out)
-	for _, p := range devinTransientPatterns {
+	for _, p := range crushTransientPatterns {
 		if strings.Contains(lower, p) {
 			return true, "transient: " + p
 		}
@@ -1263,13 +1245,13 @@ func isSecretFlag(a string) bool {
 
 var jsonBlockRegex = regexp.MustCompile("(?s)```json\\s*(.*?)\\s*```")
 
-// parseReviewOutput extracts the last ```json block from Devin's output. It
+// parseReviewOutput extracts the last ```json block from Crush's output. It
 // is strict: a missing block or unparseable JSON is an error — treating prose
 // as "no comments" would silently approve the PR.
 func parseReviewOutput(out string) (*domain.Output, error) {
 	matches := jsonBlockRegex.FindAllStringSubmatch(out, -1)
 	if len(matches) == 0 {
-		return nil, errors.New("no json block in devin output")
+		return nil, errors.New("no json block in crush output")
 	}
 	last := matches[len(matches)-1][1]
 	var result domain.Output
@@ -1279,7 +1261,7 @@ func parseReviewOutput(out string) (*domain.Output, error) {
 	return &result, nil
 }
 
-// validateReviewOutput rejects Devin runs that produced unusable review
+// validateReviewOutput rejects Crush runs that produced unusable review
 // output, so the retry loop can try again instead of approving blindly: the
 // JSON must parse, and an approval (zero comments) must come with the audit
 // trail proving the review actually ran.
@@ -1294,7 +1276,7 @@ func validateReviewOutput(out string) error {
 	return nil
 }
 
-// validateSplitOutput rejects Devin runs that produced no usable text — an
+// validateSplitOutput rejects Crush runs that produced no usable text — an
 // empty proposal comment on a PR is a transient failure, not an answer.
 func validateSplitOutput(out string) error {
 	if strings.TrimSpace(out) == "" {
@@ -1310,7 +1292,7 @@ func validateReconcileOutput(out string) error {
 	return err
 }
 
-// reconcileFindings runs a focused second Devin pass that re-verifies each
+// reconcileFindings runs a focused second Crush pass that re-verifies each
 // finding from the previous bot review against the current code, then merges
 // still-present findings the fresh review missed back into the output. It
 // runs AFTER the unbiased fresh review so prior findings cannot bias it.
@@ -1332,7 +1314,7 @@ func (r *ReviewUsecase) reconcileFindings(ctx context.Context, j *domain.Review,
 		return
 	}
 
-	out, _, _, err := r.runDevin(ctx, j, worktree, prompt, validateReconcileOutput)
+	out, _, _, err := r.runCrush(ctx, j, worktree, prompt, validateReconcileOutput)
 	if err != nil {
 		if ctx.Err() != nil {
 			return // job cancelled or deadline — don't fabricate statuses
@@ -1415,298 +1397,5 @@ func (r *ReviewUsecase) renderReconcilePrompt(j *domain.Review, prev *github.Pre
 	return buf.String(), nil
 }
 
-// syncScriptName is the generated helper the agent runs to refresh the bare
-// clone its worktree belongs to. It lives in the (deny-listed) config dir —
-// the script only needs to be executable, not readable.
-const syncScriptName = "repo-sync.sh"
-
-// repoSyncScript is the body of the generated helper. The script is the only
-// credentialed git path an agent can reach: it runs outside the Devin sandbox
-// (sandbox.excluded), fixes git's argv itself, and wipes the environment so
-// agent-controlled variables (GIT_CONFIG_PARAMETERS URL rewrites, credential
-// helpers, trace targets) cannot redirect the installation token. The
-// askpass helper additionally answers credentials only for ELYORAA_GIT_HOST.
-const repoSyncScript = `#!/bin/sh
-# elyoraa repo-sync — refresh the local clone backing a worktree.
-#
-# Usage: repo-sync.sh [worktree-path]      (defaults to the current directory)
-#
-# Runs ` + "`git -C <bare> fetch --prune origin`" + ` with the server's credentials. The
-# worktree shares the clone's object store and refs, so a synced clone is
-# visible to ` + "`git log`" + `/` + "`git show`" + `/` + "`git checkout`" + ` here immediately.
-set -eu
-
-BASE=${ELYORAA_WORKSPACE_BASE:?ELYORAA_WORKSPACE_BASE is not set}
-BASE=$(cd "$BASE" && pwd -P)
-
-# Resolve the worktree (positional arg or cwd) and require it to live under
-# the workspace.
-WT=$(cd "${1:-.}" && pwd -P)
-case "$WT" in
-  "$BASE"/*) ;;
-  *) echo "repo-sync: $WT is not inside $BASE" >&2; exit 1 ;;
-esac
-
-# Locate the shared git dir backing the worktree. PATH is pinned so no
-# agent-provided binary can shadow git here.
-COMMON=$(env -i PATH=/usr/local/bin:/usr/bin:/bin git -C "$WT" rev-parse --git-common-dir 2>/dev/null) || {
-  echo "repo-sync: $WT is not a git worktree" >&2; exit 1
-}
-case "$COMMON" in
-  /*) ;;
-  *) COMMON="$WT/$COMMON" ;;
-esac
-BARE=$(cd "$COMMON" 2>/dev/null && pwd -P) || {
-  echo "repo-sync: cannot resolve git dir $COMMON" >&2; exit 1
-}
-
-# Only managed bare clones (<base>/<owner>/<repo>.git) may be fetched — a
-# repo created deeper in the tree could carry an attacker-controlled origin.
-REL=${BARE#"$BASE"/}
-case "$REL" in
-  */*.git)
-    PARENT=${REL%/*}
-    case "$PARENT" in
-      */*) echo "repo-sync: $BARE is not a managed bare clone" >&2; exit 1 ;;
-    esac
-    ;;
-  *) echo "repo-sync: $BARE is not a managed bare clone" >&2; exit 1 ;;
-esac
-
-if env -i \
-  PATH=/usr/local/bin:/usr/bin:/bin \
-  HOME="${HOME:-/tmp}" \
-  GIT_TERMINAL_PROMPT=0 \
-  GIT_ASKPASS="${GIT_ASKPASS:?GIT_ASKPASS is not set}" \
-  ELYORAA_GIT_TOKEN_FILE="${ELYORAA_GIT_TOKEN_FILE:?ELYORAA_GIT_TOKEN_FILE is not set}" \
-  ELYORAA_GIT_HOST="${ELYORAA_GIT_HOST:?ELYORAA_GIT_HOST is not set}" \
-  git -C "$BARE" fetch --prune --update-head-ok origin; then
-  exit 0
-fi
-
-echo "repo-sync: fetch failed" >&2
-exit 1
-`
-
-// syncCmd is the agent-side path to the generated repo-sync helper.
-func (r *ReviewUsecase) syncCmd() string {
-	return filepath.Join(r.cfg.DevinConfigDir, syncScriptName)
-}
-
-// WriteDevinConfig writes a locked devin-config.json inside dir, plus the
-// repo-sync.sh helper the agent uses to refresh a worktree's clone. It omits
-// the mem0 MCP server unless MEM0_API_KEY is set. Using a directory instead
-// of a single file path makes bind-mounts safe against atomic rename-writes.
-//
-// The deny list hides credential material from the agent: Read(...) denies
-// hide paths at the OS level when --sandbox is active, and block the read tool
-// otherwise. tokenDir holds GitHub installation tokens; configDir holds this
-// config (and the mem0 API key).
-//
-// Agent git access: read-only commands and repo-local mutations (checkout,
-// switch, reset, restore, clean, worktree) are allowed — the mutations run
-// OUTSIDE the sandbox via sandbox.excluded because a worktree's git metadata
-// lives in the shared bare clone, outside the sandbox's writable workspace.
-// The credentialed path is exactly one fixed-argv script. Direct remote git
-// ops are denied outright rather than merely sandboxed: sandboxed commands
-// still inherit GIT_ASKPASS/ELYORAA_GIT_TOKEN_FILE, and while the askpass
-// host-lock keeps the token on ELYORAA_GIT_HOST, an org-scoped installation
-// token could otherwise read OTHER repos the App is installed on. Commands
-// that move shared refs or touch the credential machinery are denied too —
-// in every mode.
-func WriteDevinConfig(dir, tokenDir string) error {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-
-	syncPath := filepath.Join(dir, syncScriptName)
-
-	cfg := map[string]any{
-		"permissions": map[string][]string{
-			"allow": {
-				"read",
-				"grep",
-				"glob",
-				"mcp__mem0__*",
-				"Exec(" + syncPath + ")",
-				"Exec(git diff)",
-				"Exec(git status)",
-				"Exec(git log)",
-				"Exec(git show)",
-				"Exec(git rev-parse)",
-				"Exec(git ls-files)",
-				"Exec(git ls-tree)",
-				"Exec(git for-each-ref)",
-				"Exec(git cat-file)",
-				"Exec(git blame)",
-				"Exec(git describe)",
-				"Exec(git merge-base)",
-				"Exec(git shortlog)",
-				"Exec(git name-rev)",
-				"Exec(git branch)",
-				"Exec(git tag)",
-				"Exec(git remote)",
-				"Exec(git checkout)",
-				"Exec(git switch)",
-				"Exec(git restore)",
-				"Exec(git reset)",
-				"Exec(git clean)",
-				"Exec(git worktree)",
-			},
-			"deny": {
-				"edit",
-				"Write(**)",
-				"Exec(curl)",
-				"Exec(wget)",
-				"Exec(gh)",
-				// Every git path that can reach a remote or mint fresh
-				// credentials — repo-sync is the only credentialed fetch.
-				"Exec(git push)",
-				"Exec(git fetch)",
-				"Exec(git pull)",
-				"Exec(git clone)",
-				"Exec(git ls-remote)",
-				"Exec(git submodule)",
-				"Exec(git archive)",
-				"Exec(git daemon)",
-				"Exec(git instaweb)",
-				"Exec(git svn)",
-				"Exec(git send-email)",
-				"Exec(git upload-pack)",
-				"Exec(git receive-pack)",
-				"Exec(git maintenance)",
-				// Credential machinery and remote retargeting — never, in
-				// any permission mode.
-				"Exec(git credential)",
-				"Exec(git config)",
-				"Exec(git remote add)",
-				"Exec(git remote set-url)",
-				"Exec(git remote rm)",
-				"Exec(git remote rename)",
-				"Exec(git remote update)",
-				"Exec(git remote prune)",
-				"Exec(git remote set-head)",
-				"Exec(git remote set-branches)",
-				"Exec(git update-ref)",
-				"Exec(git pack-refs)",
-				"Exec(git gc)",
-				"Exec(git prune)",
-				"Exec(git reflog expire)",
-				// Ref-creating forms of the otherwise-allowed commands —
-				// shared refs live in the bare clone and are visible to
-				// every concurrent job.
-				"Exec(git checkout -b)",
-				"Exec(git checkout -B)",
-				"Exec(git checkout -t)",
-				"Exec(git checkout --track)",
-				"Exec(git switch -c)",
-				"Exec(git switch -C)",
-				"Exec(git switch -t)",
-				"Exec(git switch --track)",
-				"Exec(git switch --create)",
-				"Exec(git switch --force-create)",
-				// Shared-ref mutation: `git branch`/`git tag` list safely, but
-				// the flag forms below delete/move/copy refs other jobs use.
-				// (Positional `git branch <name>`/`git tag <name>` still create
-				// refs — self-healing: fetch --prune removes branch refs that
-				// don't exist on origin.)
-				"Exec(git branch -d)",
-				"Exec(git branch -D)",
-				"Exec(git branch --delete)",
-				"Exec(git branch -m)",
-				"Exec(git branch -M)",
-				"Exec(git branch --move)",
-				"Exec(git branch -c)",
-				"Exec(git branch -C)",
-				"Exec(git branch --copy)",
-				"Exec(git branch -f)",
-				"Exec(git branch --force)",
-				"Exec(git branch -u)",
-				"Exec(git branch --set-upstream-to)",
-				"Exec(git branch --unset-upstream)",
-				"Exec(git tag -d)",
-				"Exec(git tag -D)",
-				"Exec(git tag --delete)",
-				"Exec(git tag -f)",
-				"Exec(git tag --force)",
-				// `git worktree` is allowed for `list` — the subcommands below
-				// create/destroy worktrees shared with other jobs.
-				"Exec(git worktree add)",
-				"Exec(git worktree remove)",
-				"Exec(git worktree move)",
-				"Exec(git worktree repair)",
-				"Exec(git worktree lock)",
-				"Exec(git worktree unlock)",
-				"Exec(git worktree prune)",
-				// Local plumbing that still writes shared refs or worktree
-				// linkage.
-				"Exec(git symbolic-ref)",
-				"Exec(git bisect)",
-				// History writers the read-only policy never needs.
-				"Exec(git commit)",
-				"Exec(git merge)",
-				"Exec(git rebase)",
-				"Exec(git cherry-pick)",
-				"Exec(git revert)",
-				"Exec(git am)",
-				"Exec(git apply)",
-				"Exec(git stash)",
-				"Exec(git replace)",
-				"Fetch(**)",
-				// Credentials and secrets the agent must never see —
-				// hidden at OS level under --sandbox.
-				"Read(/run/secrets/**)",
-				"Read(" + tokenDir + "/**)",
-				"Read(" + dir + "/**)",
-				"Read(~/.config/devin/**)",
-				"Read(~/.local/share/devin/**)",
-				"Read(/app/git-askpass.sh)",
-				"Read(**/.env)",
-				"Read(**/.env.*)",
-				"Read(**/.ssh/**)",
-				"Read(**/id_rsa*)",
-				"Read(**/id_ed25519*)",
-				"Read(**/.gitconfig)",
-				"Read(**/*.pem)",
-			},
-		},
-		"sandbox": map[string]any{
-			"excluded": map[string][]string{
-				"allow": {
-					// The only credentialed git path: env-scrubbed,
-					// fixed-argv `git -C <bare> fetch --prune origin`.
-					"Exec(" + syncPath + ")",
-					// Repo-scoped, credential-free mutations the sandbox's
-					// read-only view of the shared git dir would reject.
-					"Exec(git checkout)",
-					"Exec(git switch)",
-					"Exec(git restore)",
-					"Exec(git reset)",
-					"Exec(git clean)",
-					"Exec(git worktree)",
-				},
-			},
-		},
-	}
-
-	if os.Getenv("MEM0_API_KEY") != "" {
-		cfg["mcpServers"] = map[string]any{
-			"mem0": map[string]any{
-				"type": "http",
-				"url":  "https://mcp.mem0.ai/mcp",
-				"env": map[string]string{
-					"MEM0_API_KEY": os.Getenv("MEM0_API_KEY"),
-				},
-			},
-		}
-	}
-
-	b, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return err
-	}
-	if err := os.WriteFile(filepath.Join(dir, "devin-config.json"), b, 0o644); err != nil {
-		return err
-	}
-	return os.WriteFile(syncPath, []byte(repoSyncScript), 0o755)
-}
+// syncCmd names the credential-free repository tool exposed to Crush.
+func (r *ReviewUsecase) syncCmd() string { return "mcp_elyoraa_sync" }

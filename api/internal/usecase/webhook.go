@@ -685,7 +685,7 @@ func (u *WebhookUsecase) enqueueReview(ctx context.Context, review domain.Review
 	review.IgnoredPaths = rc.IgnoredPaths
 
 	// Mention-triggered jobs are rate-limited per author per repo — every
-	// mention costs a Devin run. Auto-reviews carry no TriggerAuthor.
+	// mention costs a Crush run. Auto-reviews carry no TriggerAuthor.
 	if review.TriggerAuthor != "" && !u.limiter.allow(review.TriggerAuthor+"@"+review.Owner+"/"+review.Repo, time.Now()) {
 		if evt != nil {
 			_ = u.store.Record(ctx, evt)
@@ -774,7 +774,7 @@ func (u *WebhookUsecase) enqueueReview(ctx context.Context, review domain.Review
 
 // jobsToday counts tracker records for the repo started today (UTC). The
 // tracker is bounded (~1000 records memory / persistent for BoltDB), so a
-// full scan per enqueue is cheap relative to a Devin run.
+// full scan per enqueue is cheap relative to a Crush run.
 func (u *WebhookUsecase) jobsToday(ctx context.Context, owner, repo string) int {
 	t := u.q.Tracker()
 	if t == nil {

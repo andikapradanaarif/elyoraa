@@ -40,9 +40,9 @@ The comment that triggered this analysis:
 
 ## Repository Access
 
-The repository is cloned and available in your working directory — it is a git worktree of the server's local clone, so `git` commands (`log`, `show`, `diff`, `status`, `branch`, `checkout`) work. You can search and read the code to provide more informed analysis.
+The repository tools access a git worktree of the server's local clone, so `git` commands via `mcp_elyoraa_git` (`log`, `show`, `diff`, `status`) work. You can search and read the code to provide more informed analysis.
 
-The clone is refreshed when your session starts. If you need newer refs mid-run — e.g. a branch that just landed or the discussion mentions a new commit — run `{{.SyncCmd}}` to fetch the latest state of the repo and its branches, then inspect the updated refs with git.
+The clone is refreshed when your session starts. If you need newer refs mid-run — e.g. a branch that just landed or the discussion mentions a new commit — call `{{.SyncCmd}}` to fetch the latest state of the repo and its branches, then inspect the updated refs with git.
 {{else}}
 
 ## Repository Not Available

@@ -349,11 +349,9 @@ func (c *Cache) hasActiveWorktrees(bare string) bool {
 	return count > 1
 }
 
-// WriteTokenFile persists a GitHub installation token in the token dir for
-// use as a git credential. Callers must invoke the returned cleanup when the
-// token is no longer needed. The dir is deny-listed for agent reads, so the
-// file stays hidden inside the Devin sandbox while the excluded askpass
-// helper can still consume it.
+// WriteTokenFile persists a server-side GitHub installation token for the
+// askpass helper. Callers must clean it up when the operation finishes.
+// Agent repository tools never expose the token directory or environment.
 func (c *Cache) WriteTokenFile(token string) (string, func(), error) {
 	return c.writeToken(token)
 }

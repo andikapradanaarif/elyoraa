@@ -120,7 +120,7 @@ type PriorFindingStatus struct {
 	Status string `json:"status"` // "fixed", "still_present", or "unclear"
 }
 
-// Output is the parsed Devin review output.
+// Output is the parsed Crush review output.
 type Output struct {
 	Summary           string               `json:"summary"`
 	PassesCompleted   []string             `json:"passes_completed"`

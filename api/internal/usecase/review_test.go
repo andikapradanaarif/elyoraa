@@ -19,7 +19,7 @@ func exitErr() error {
 	return &exec.ExitError{ProcessState: nil}
 }
 
-func TestClassifyDevinError(t *testing.T) {
+func TestClassifyCrushError(t *testing.T) {
 	ctx := context.Background()
 
 	cases := []struct {
@@ -31,7 +31,7 @@ func TestClassifyDevinError(t *testing.T) {
 		{"empty output", exitErr(), "", true},
 		{"whitespace output", exitErr(), "   \n", true},
 		{"connection refused", exitErr(), "dial tcp: connection refused", true},
-		{"unknown model", exitErr(), "Error: Unknown model swe-2-high", true},
+		{"unknown model", exitErr(), "Error: Unknown model provider/model", true},
 		{"empty model list", exitErr(), "no models available", true},
 		{"rate limit", exitErr(), "429 too many requests", true},
 		{"untrusted workspace", exitErr(), "fatal: untrusted workspace", false},
@@ -43,7 +43,7 @@ func TestClassifyDevinError(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			tr, reason := classifyDevinError(tc.err, ctx, tc.out)
+			tr, reason := classifyCrushError(tc.err, ctx, tc.out)
 			if tr != tc.transient {
 				t.Fatalf("transient = %v, want %v (reason=%q)", tr, tc.transient, reason)
 			}
@@ -51,12 +51,12 @@ func TestClassifyDevinError(t *testing.T) {
 	}
 }
 
-func TestClassifyDevinErrorContexts(t *testing.T) {
+func TestClassifyCrushErrorContexts(t *testing.T) {
 	// Deadline exceeded → transient.
 	dl, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
 	defer cancel()
 	time.Sleep(time.Millisecond)
-	tr, _ := classifyDevinError(fmt.Errorf("killed"), dl, "")
+	tr, _ := classifyCrushError(fmt.Errorf("killed"), dl, "")
 	if !tr {
 		t.Fatal("deadline exceeded should be transient")
 	}
@@ -64,24 +64,24 @@ func TestClassifyDevinErrorContexts(t *testing.T) {
 	// Canceled → not transient.
 	cc, cancel2 := context.WithCancel(context.Background())
 	cancel2()
-	tr, _ = classifyDevinError(fmt.Errorf("killed"), cc, "")
+	tr, _ = classifyCrushError(fmt.Errorf("killed"), cc, "")
 	if tr {
 		t.Fatal("canceled should not be transient")
 	}
 }
 
-func TestClassifyDevinErrorBinaryMissing(t *testing.T) {
+func TestClassifyCrushErrorBinaryMissing(t *testing.T) {
 	_, err := exec.LookPath("definitely-not-a-real-binary-xyz")
 	if err == nil {
 		t.Skip("binary unexpectedly present")
 	}
-	tr, reason := classifyDevinError(err, context.Background(), "")
+	tr, reason := classifyCrushError(err, context.Background(), "")
 	if tr {
 		t.Fatalf("missing binary should not be transient, reason=%q", reason)
 	}
 }
 
-func TestClassifyDevinErrorSignalKilled(t *testing.T) {
+func TestClassifyCrushErrorSignalKilled(t *testing.T) {
 	// A process killed by a signal produces *exec.ExitError whose
 	// ProcessState never exited cleanly — OOM kills and deploy
 	// interruptions must retry, not mark the job permanently failed.
@@ -90,14 +90,14 @@ func TestClassifyDevinErrorSignalKilled(t *testing.T) {
 	if !errors.As(err, &ee) || ee.ProcessState.Exited() {
 		t.Fatalf("setup: expected signal-killed ExitError, got %v", err)
 	}
-	tr, reason := classifyDevinError(err, context.Background(), "partial output")
+	tr, reason := classifyCrushError(err, context.Background(), "partial output")
 	if !tr {
 		t.Fatalf("signal-killed run should be transient, reason=%q", reason)
 	}
 	// An ordinary non-zero exit is not a signal — classification falls
 	// through to the output patterns as before.
 	err = exec.Command("sh", "-c", "exit 1").Run()
-	tr, _ = classifyDevinError(err, context.Background(), "some error")
+	tr, _ = classifyCrushError(err, context.Background(), "some error")
 	if tr {
 		t.Fatal("exit-status failure with unrecognized output should not be transient")
 	}
@@ -117,17 +117,17 @@ func TestTailString(t *testing.T) {
 }
 
 func TestRedactArgs(t *testing.T) {
-	got := redactArgs("devin", []string{
-		"-p",
+	got := redactArgs("crush", []string{
+		"run",
 		"--token", "ghp_secretvalue123",
-		"--model", "swe-2-high",
+		"--model", "provider/model",
 		"--api-key=sk-abcdefgh1234",
-		"--prompt-file", "/tmp/x/prompt.md",
+		"--quiet",
 	})
 	if strings.Contains(got, "ghp_secretvalue123") || strings.Contains(got, "sk-abcdefgh1234") {
 		t.Fatalf("secrets leaked in argv: %s", got)
 	}
-	if !strings.Contains(got, "swe-2-high") || !strings.Contains(got, "/tmp/x/prompt.md") {
+	if !strings.Contains(got, "provider/model") || !strings.Contains(got, "--quiet") {
 		t.Fatalf("non-secret args mangled: %s", got)
 	}
 }
@@ -143,9 +143,9 @@ func TestSleepCtx(t *testing.T) {
 	}
 }
 
-func TestClassifyDevinErrorWrapped(t *testing.T) {
+func TestClassifyCrushErrorWrapped(t *testing.T) {
 	err := fmt.Errorf("wrapped: %w", errors.New("some exit error"))
-	tr, _ := classifyDevinError(err, context.Background(), "")
+	tr, _ := classifyCrushError(err, context.Background(), "")
 	if !tr {
 		t.Fatal("empty output should be transient regardless of error type")
 	}

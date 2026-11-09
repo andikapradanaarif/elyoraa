@@ -7,7 +7,7 @@ import (
 
 // rateLimiter is a per-key sliding-window counter. It bounds how many
 // mention-triggered jobs one author can start per repo per window — every
-// mention costs a Devin run, so unbounded mentions are unbounded spend.
+// mention costs a Crush run, so unbounded mentions are unbounded spend.
 type rateLimiter struct {
 	mu     sync.Mutex
 	limit  int

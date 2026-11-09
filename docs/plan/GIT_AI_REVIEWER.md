@@ -1,3 +1,5 @@
+> Runtime update: elyoraa now uses the installed [Crush fork](https://github.com/andikapradanaarif/crush). The historical Devin CLI/config/sandbox details below are superseded by [the current runtime notes](../../api/README.md#crush-runtime).
+
 # elyoraa — AI PR Reviewer
 
 A Go **engine** that receives GitHub webhooks from multiple repos across multiple projects and reviews each PR automatically using **Devin CLI** as the reviewer brain. Triggered by GitHub webhooks on PR open/update.

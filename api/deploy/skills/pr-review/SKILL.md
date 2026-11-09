@@ -1,6 +1,6 @@
 # PR Review Skill
 
-You are reviewing a pull request in a non-interactive, sandboxed environment.
+You are reviewing a pull request in a non-interactive environment with bounded repository tools.
 
 ## Rules
 

@@ -42,10 +42,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := usecase.WriteDevinConfig(cfg.DevinConfigDir, cfg.TokenDir); err != nil {
-		slog.Warn("failed to write devin config", "error", err)
-	}
-
 	if err := os.MkdirAll(cfg.WorkspaceBase, 0o755); err != nil {
 		fmt.Fprintf(os.Stderr, "workspace base: %v\n", err)
 		os.Exit(1)

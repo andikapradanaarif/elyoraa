@@ -17,7 +17,7 @@ var secretPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`),
 	// OpenAI / Anthropic-style API keys.
 	regexp.MustCompile(`\bsk-(proj|ant)-[A-Za-z0-9_-]{16,}\b`),
-	// Devin CLI credentials.toml material.
+	// Crush CLI credentials.toml material.
 	regexp.MustCompile(`(?i)(access_token|refresh_token|session_token)\s*=\s*"[^"]{8,}"`),
 }
 

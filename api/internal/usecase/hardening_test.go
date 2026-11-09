@@ -35,7 +35,7 @@ func TestEnqueueReview_UnregisteredRepoDropped(t *testing.T) {
 	}
 }
 
-// A mention past the author's rate limit must be dropped before any Devin
+// A mention past the author's rate limit must be dropped before any Crush
 // work is enqueued — and before any GitHub call (nil client proves it).
 func TestEnqueueReview_RateLimited(t *testing.T) {
 	cfg := &config.Config{

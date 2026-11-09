@@ -8,34 +8,22 @@ COPY . .
 RUN CGO_ENABLED=0 go build -o /build/elyoraa ./cmd/server && \
     CGO_ENABLED=0 go build -o /build/elyoraa-migrate ./cmd/migrate
 
-# Runtime stage
-# Use Debian slim because the host-provided `devin` binary is usually glibc-linked.
+# Build the user's Crush fork, pinned to the installed system revision.
+# The fork retains the upstream module path, so build from a checkout.
+FROM golang:1.27.3 AS crush-builder
+ARG CRUSH_REPO=https://github.com/andikapradanaarif/crush.git
+ARG CRUSH_REF=5f2586a7d1bacc3b60e2733042ae6538efa99e58
+RUN git init /crush && git -C /crush remote add origin "$CRUSH_REPO" && \
+    git -C /crush fetch --depth 1 origin "$CRUSH_REF" && \
+    git -C /crush checkout --detach FETCH_HEAD
+WORKDIR /crush
+RUN CGO_ENABLED=0 go build -o /out/crush .
+
 FROM debian:trixie-slim
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends git ca-certificates bubblewrap socat curl && \
+    apt-get install -y --no-install-recommends git ca-certificates curl && \
     rm -rf /var/lib/apt/lists/*
-
-# Devin CLI, bundled so no host bind-mount is required. The release manifest
-# at static.devin.ai/cli/<version>/manifest.json carries per-platform tarball
-# URLs + sha256 — verify the checksum, then lay the tarball down at
-# /usr/local (bin/devin + share/devin/docs land where the CLI expects them).
-# Pin a release with: docker build --build-arg DEVIN_CLI_VERSION=3000.11.92 ...
-ARG DEVIN_CLI_VERSION=current
-RUN set -eu; \
-    case "$(uname -m)" in \
-      x86_64)  target="x86_64-unknown-linux" ;; \
-      aarch64) target="aarch64-unknown-linux" ;; \
-      *) echo "unsupported arch: $(uname -m)" >&2; exit 1 ;; \
-    esac; \
-    manifest=$(curl -fsSL "https://static.devin.ai/cli/${DEVIN_CLI_VERSION}/manifest.json"); \
-    entry=$(printf '%s' "$manifest" | grep -o "\"${target}\"[[:space:]]*:[[:space:]]*{[^}]*}"); \
-    url=$(printf '%s' "$entry" | grep -o '"url"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"\([^"]*\)"$/\1/'); \
-    sha=$(printf '%s' "$entry" | grep -o '"sha256"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"\([^"]*\)"$/\1/'); \
-    [ -n "$url" ] && [ -n "$sha" ] || { echo "no ${target} bundle in manifest" >&2; exit 1; }; \
-    curl -fsSL "$url" -o /tmp/devin.tar.gz; \
-    echo "${sha}  /tmp/devin.tar.gz" | sha256sum -c -; \
-    tar -xzf /tmp/devin.tar.gz -C /usr/local bin/devin share; \
-    rm -f /tmp/devin.tar.gz
+COPY --from=crush-builder /out/crush /usr/local/bin/crush
 
 RUN useradd -m -s /bin/sh elyoraa
 
@@ -47,23 +35,12 @@ COPY deploy/git-askpass.sh /app/git-askpass.sh
 COPY deploy/entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/git-askpass.sh /app/entrypoint.sh
 
-# Devin skill: install to the user's global skill directory.
-RUN mkdir -p /home/elyoraa/.config/devin/skills/pr-review
-COPY deploy/skills/pr-review/SKILL.md /home/elyoraa/.config/devin/skills/pr-review/SKILL.md
-
-# Devin's Linux sandbox creates $HOME/.local/share/chisel/sandbox-locks on
-# the first sandboxed exec call. Compose bind-mounts a host dir over
-# ~/.local/share/devin — when .local/share is absent from the image, Docker
-# creates the mount's missing parent dirs as root:root, the elyoraa user
-# cannot create the sibling `chisel` dir, and EVERY sandboxed exec fails
-# with Permission denied. Pre-create the tree elyoraa-owned: Docker only
-# auto-creates *missing* mount parents, so existing image dirs keep their
-# ownership under the bind-mount.
-RUN mkdir -p /home/elyoraa/.local/share/chisel/sandbox-locks && \
+# Crush reads the user's trusted config/auth data; job state is temporary.
+RUN mkdir -p /home/elyoraa/.config/crush /home/elyoraa/.local/share/crush && \
     chown -R elyoraa:elyoraa /home/elyoraa
 
-# Pre-create workspace, token, devin-config, queue, and tmp dirs.
-RUN mkdir -p /var/lib/elyoraa/workspace /var/lib/elyoraa/tokens /var/lib/elyoraa/devin-config /var/lib/elyoraa/queue /tmp/elyoraa && \
+# Pre-create workspace, token, queue, and tmp dirs.
+RUN mkdir -p /var/lib/elyoraa/workspace /var/lib/elyoraa/tokens /var/lib/elyoraa/queue /tmp/elyoraa && \
     chown -R elyoraa:elyoraa /var/lib/elyoraa /tmp/elyoraa
 
 USER elyoraa

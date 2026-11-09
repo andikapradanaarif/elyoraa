@@ -51,7 +51,7 @@ type JobRecord struct {
 	// DurationSeconds is execution time (pickup → finish), excluding queue
 	// wait. Populated on completion for rate calibration.
 	DurationSeconds int64 `json:"duration_seconds,omitempty"`
-	// AttemptSeconds is the duration of the final successful Devin attempt —
+	// AttemptSeconds is the duration of the final successful Crush attempt —
 	// retry backoff excluded. Calibration prefers it over DurationSeconds.
 	AttemptSeconds int64     `json:"attempt_seconds,omitempty"`
 	UpdatedAt      time.Time `json:"updated_at"`
@@ -100,7 +100,7 @@ type JobAnnotation struct {
 	// Type updates the record's job type — a gate that triaged to "review"
 	// must read as a review for audit and rate calibration.
 	Type string
-	// AttemptSeconds records the final successful Devin attempt duration so
+	// AttemptSeconds records the final successful Crush attempt duration so
 	// calibration measures work time, not retry/backoff wall time.
 	AttemptSeconds int64
 }

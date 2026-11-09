@@ -43,9 +43,9 @@ func testTracker(t *testing.T, tr JobTracker) {
 		t.Fatalf("status = %q, want processing", rec.Status)
 	}
 
-	tr.Failed(ctx, j, 4, errors.New("devin exploded"))
+	tr.Failed(ctx, j, 4, errors.New("crush exploded"))
 	rec, _ = tr.Get(ctx, j.JobKey)
-	if rec.Status != JobStatusFailed || rec.Error != "devin exploded" || rec.Attempts != 4 {
+	if rec.Status != JobStatusFailed || rec.Error != "crush exploded" || rec.Attempts != 4 {
 		t.Fatalf("bad failed record: %+v", rec)
 	}
 	if rec.FinishedAt == nil {
