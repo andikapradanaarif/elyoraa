@@ -733,12 +733,13 @@ func (u *WebhookUsecase) enqueueReview(ctx context.Context, review domain.Review
 		_ = u.store.Record(ctx, evt)
 	}
 
-	ctx, job, ok := u.d.TryStart(ctx, review)
+	jobCtx, job, ok := u.d.TryStart(ctx, review)
 	if !ok {
 		_ = u.store.UpdateStatus(ctx, review.DeliveryID, "dropped", "duplicate review in flight")
 		slog.Info("skipping duplicate review", "job", review.JobKey)
 		return domain.Review{}, ErrDuplicate
 	}
+	ctx = jobCtx
 
 	// Post the queued comment if we don't already have one. It says
 	// "queued", not "in progress" — the job may wait behind running work

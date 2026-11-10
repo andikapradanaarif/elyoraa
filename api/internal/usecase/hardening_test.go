@@ -14,6 +14,67 @@ import (
 	"github.com/andikapradanaarif/elyoraa/internal/repository/queue"
 )
 
+// ctxCheckingStore flags any store call handed a nil context: TryStart
+// returns one when it refuses a duplicate, and passing it to the PostgreSQL
+// store used to panic inside the driver, swallowing the mention.
+type ctxCheckingStore struct {
+	t     *testing.T
+	calls []string
+}
+
+func (s *ctxCheckingStore) Record(ctx context.Context, _ *domain.WebhookEvent) error {
+	s.check("record", ctx)
+	return nil
+}
+
+func (s *ctxCheckingStore) UpdateStatus(ctx context.Context, _, status, _ string) error {
+	s.check("status:"+status, ctx)
+	return nil
+}
+
+func (s *ctxCheckingStore) DeleteOlderThan(context.Context, time.Time) (int64, error) {
+	return 0, nil
+}
+
+func (s *ctxCheckingStore) check(name string, ctx context.Context) {
+	if ctx == nil {
+		s.t.Errorf("%s got a nil context", name)
+		return
+	}
+	s.calls = append(s.calls, name)
+}
+
+func TestEnqueueReview_DuplicateDropKeepsContext(t *testing.T) {
+	cfg := &config.Config{}
+	q := queue.New(1, nil, nil, 8)
+	store := &ctxCheckingStore{t: t}
+	u := NewWebhookUsecase(cfg, nil, dedup.New(), q, store, nil, nil)
+
+	job := domain.Review{
+		Owner: "o", Repo: "r", PRNumber: 7, HeadSHA: "abc",
+		DeliveryID: "d-1", PendingCommentID: 123,
+	}
+	if _, err := u.enqueueReview(context.Background(), job, nil, domain.RepoConfig{}); err != nil {
+		t.Fatalf("first enqueue: %v", err)
+	}
+
+	dup := job
+	dup.DeliveryID = "d-2"
+	if _, err := u.enqueueReview(context.Background(), dup, nil, domain.RepoConfig{}); !errors.Is(err, ErrDuplicate) {
+		t.Fatalf("duplicate enqueue = %v, want ErrDuplicate", err)
+	}
+
+	found := false
+	for _, c := range store.calls {
+		if c == "status:dropped" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("duplicate drop was not audited, calls: %v", store.calls)
+	}
+}
+
 // WORKSPACE_BASE is the repo registry: a webhook for a repo with no bare
 // clone is acknowledged and dropped silently — no job, no GitHub call (nil
 // client proves it). elyoraa never clones on demand.
