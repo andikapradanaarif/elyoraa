@@ -34,6 +34,22 @@ var fetchRefspecs = []string{
 	"+refs/pull/*/head:refs/remotes/origin/pr/*",
 }
 
+// fetchRetryDelays back off and retry a fetch that lost a ref race. Each
+// `git fetch` validates the ref values it read at start, so a concurrent
+// writer (another replica, a manual fetch) makes it abort with "cannot lock
+// ref ... is at X but expected Y" while the clone itself stays consistent —
+// re-running picks up the current values.
+var fetchRetryDelays = []time.Duration{250 * time.Millisecond, time.Second, 3 * time.Second}
+
+// fetchRacePatterns are the git messages that mean "someone else moved a ref
+// under us", i.e. a retry will succeed.
+var fetchRacePatterns = []string{
+	"cannot lock ref",
+	"failed to lock",
+	"unable to create",
+	"cannot lock",
+}
+
 // Cache manages bare clones and per-review worktrees.
 type Cache struct {
 	base        string
@@ -41,6 +57,8 @@ type Cache struct {
 	tokenDir    string
 	gitHost     string // host the askpass credential helper may answer for
 	mu          sync.Mutex
+	fetchMu     sync.Mutex
+	fetchLocks  map[string]*sync.Mutex
 }
 
 // GitHost extracts the hostname from a git base URL — the only host the
@@ -89,6 +107,13 @@ func (c *Cache) Fetch(ctx context.Context, owner, repo, token string) error {
 		return ErrRepoNotCloned
 	}
 	bare := c.barePath(owner, repo)
+
+	// One fetch per clone at a time: concurrent fetches into the same bare
+	// repo race on ref updates and abort each other ("cannot lock ref ...
+	// is at X but expected Y"), which used to fail a review outright.
+	unlock := c.lockFetch(bare)
+	defer unlock()
+
 	if err := c.ensureFetchRefspecs(ctx, bare); err != nil {
 		return fmt.Errorf("configure fetch refspecs: %w", err)
 	}
@@ -103,17 +128,67 @@ func (c *Cache) Fetch(ctx context.Context, owner, repo, token string) error {
 		// non-fatal
 	}
 
-	// --update-head-ok: an agent may legitimately `git checkout <branch>` in
-	// its worktree; without the flag that pins the shared ref and makes every
-	// other job's fetch abort with "refusing to fetch into branch checked
-	// out". The worst outcome here is one agent's own checkout going stale.
-	cmd := exec.CommandContext(ctx, "git", "-C", bare, "fetch",
-		"--prune", "--update-head-ok")
-	cmd.Env = c.gitEnv(tokenFile)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("git fetch: %w\n%s", err, out)
+	return c.fetch(ctx, bare, tokenFile)
+}
+
+// fetch runs the fetch command, retrying ref-lock races that a cross-process
+// writer (another replica, a manual fetch) can still cause. The retry bounds
+// describe waits between attempts, so the attempt count is one more.
+func (c *Cache) fetch(ctx context.Context, bare, tokenFile string) error {
+	for attempt := 0; ; attempt++ {
+		// --update-head-ok: an agent may legitimately `git checkout <branch>` in
+		// its worktree; without the flag that pins the shared ref and makes every
+		// other job's fetch abort with "refusing to fetch into branch checked
+		// out". The worst outcome here is one agent's own checkout going stale.
+		cmd := exec.CommandContext(ctx, "git", "-C", bare, "fetch",
+			"--prune", "--update-head-ok")
+		cmd.Env = c.gitEnv(tokenFile)
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			return nil
+		}
+
+		fetchErr := fmt.Errorf("git fetch: %w\n%s", err, out)
+		if attempt >= len(fetchRetryDelays) || !isFetchRace(out) || ctx.Err() != nil {
+			return fetchErr
+		}
+		slog.Warn("fetch lost a ref race, retrying",
+			"repo", bare, "attempt", attempt+1, "error", strings.TrimSpace(string(out)))
+		select {
+		case <-ctx.Done():
+			return fetchErr
+		case <-time.After(fetchRetryDelays[attempt]):
+		}
 	}
-	return nil
+}
+
+// lockFetch serializes fetches per bare clone.
+func (c *Cache) lockFetch(bare string) func() {
+	c.fetchMu.Lock()
+	if c.fetchLocks == nil {
+		c.fetchLocks = make(map[string]*sync.Mutex)
+	}
+	m := c.fetchLocks[bare]
+	if m == nil {
+		m = &sync.Mutex{}
+		c.fetchLocks[bare] = m
+	}
+	c.fetchMu.Unlock()
+
+	m.Lock()
+	return m.Unlock
+}
+
+// isFetchRace reports whether git aborted because another process moved a
+// ref mid-fetch — transient, so a retry re-reads the current values.
+func isFetchRace(out []byte) bool {
+	msg := strings.ToLower(string(out))
+	for _, p := range fetchRacePatterns {
+		if strings.Contains(msg, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // AddWorktree creates a detached-HEAD worktree at the given SHA.

@@ -3,6 +3,7 @@ package cache
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,6 +22,18 @@ func gitRun(t *testing.T, dir string, args ...string) {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
 	}
+}
+
+// gitRunQuiet runs a git command without failing the test, for use from
+// goroutines (t.Fatalf may only be called from the test goroutine).
+func gitRunQuiet(dir string, args ...string) error {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git %s: %w\n%s", strings.Join(args, " "), err, out)
+	}
+	return nil
 }
 
 // gitSHA resolves a ref to a commit SHA in dir.
@@ -206,6 +219,137 @@ func TestFetch_ConcurrentFetches(t *testing.T) {
 	for err := range errs {
 		if err != nil {
 			t.Fatalf("concurrent Fetch: %v", err)
+		}
+	}
+}
+
+// TestFetch_ConcurrentFetchesWhileRemoteAdvances is the ref-race regression:
+// a fetch that starts before another writer moves a branch aborts with
+// "cannot lock ref ... is at X but expected Y", which used to fail the whole
+// review job. Every fetch must succeed and the clone must end up current.
+func TestFetch_ConcurrentFetchesWhileRemoteAdvances(t *testing.T) {
+	owner, repo := "o", "r"
+	seedDir, src, _ := seedBareRepo(t, owner, repo)
+	c := New(t.TempDir(), "", t.TempDir(), "file://"+seedDir)
+	preClone(t, c, seedDir, owner, repo)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 5; i++ {
+			if err := os.WriteFile(filepath.Join(src, fmt.Sprintf("f%d.txt", i)), []byte("x\n"), 0o644); err != nil {
+				return
+			}
+			gitRunQuiet(src, "add", ".")
+			gitRunQuiet(src, "commit", "-m", "advance")
+			gitRunQuiet(src, "push", "origin", "main")
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 12)
+	for i := 0; i < 12; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- c.Fetch(context.Background(), owner, repo, "tok")
+		}()
+	}
+	wg.Wait()
+	<-done
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent Fetch during advance: %v", err)
+		}
+	}
+
+	if err := c.Fetch(context.Background(), owner, repo, "tok"); err != nil {
+		t.Fatalf("final Fetch: %v", err)
+	}
+	bare := c.barePath(owner, repo)
+	if got, want := gitSHA(t, bare, "refs/heads/main"), gitSHA(t, src, "refs/heads/main"); got != want {
+		t.Fatalf("refs/heads/main = %s, want %s", got, want)
+	}
+}
+
+// TestFetch_SerializesPerClone proves the per-clone fetch lock: two fetches
+// for the same repo never overlap, two repos still fetch in parallel.
+func TestFetch_SerializesPerClone(t *testing.T) {
+	c := New(t.TempDir(), "", t.TempDir(), "")
+
+	var inFlight, maxInFlight int32
+	var mu sync.Mutex
+	enter := func() func() {
+		mu.Lock()
+		inFlight++
+		if inFlight > maxInFlight {
+			maxInFlight = inFlight
+		}
+		mu.Unlock()
+		return func() {
+			mu.Lock()
+			inFlight--
+			mu.Unlock()
+		}
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			unlock := c.lockFetch("same")
+			defer enter()()
+			time.Sleep(20 * time.Millisecond)
+			unlock()
+		}()
+	}
+	wg.Wait()
+	if maxInFlight != 1 {
+		t.Fatalf("max concurrent holders of one clone's fetch lock = %d, want 1", maxInFlight)
+	}
+
+	if a, b := c.lockFetch("a"), c.lockFetch("b"); a != nil && b != nil {
+		a()
+		b()
+	} else {
+		t.Fatal("locks for distinct clones must both be acquirable")
+	}
+}
+
+func TestIsFetchRace(t *testing.T) {
+	cases := []struct {
+		name string
+		out  string
+		want bool
+	}{
+		{
+			name: "ref value moved under us",
+			out: "error: cannot lock ref 'refs/heads/feat/x': is at 8b6cf4190000 " +
+				"but expected 8abce5ad0000\n",
+			want: true,
+		},
+		{
+			name: "packed refs lock held",
+			out:  "fatal: unable to create '/ws/o/r.git/packed-refs.lock': File exists.\n",
+			want: true,
+		},
+		{
+			name: "authentication failure",
+			out:  "fatal: Authentication failed for 'https://github.com/o/r.git/'\n",
+			want: false,
+		},
+		{
+			name: "unknown ref",
+			out:  "fatal: couldn't find remote ref refs/pull/1/head\n",
+			want: false,
+		},
+	}
+	for _, tc := range cases {
+		if got := isFetchRace([]byte(tc.out)); got != tc.want {
+			t.Fatalf("%s: isFetchRace = %v, want %v", tc.name, got, tc.want)
 		}
 	}
 }
