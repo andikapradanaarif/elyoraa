@@ -90,8 +90,8 @@ api/
 │   ├── middleware/         # request ID / access logging
 │   └── startup/            # startup validation
 ├── migration/              # versioned PostgreSQL migrations and runner
-├── prompts/review.md       # Crush prompt template
-└── deploy/                 # Dockerfile, compose, askpass, skill
+├── prompts/                # Crush prompt templates (review, reconcile, split, issue, respond, gate)
+└── deploy/                 # Dockerfile, compose, askpass, GHCR push script
 ```
 
 ## Notes
