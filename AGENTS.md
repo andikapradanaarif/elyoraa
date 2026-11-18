@@ -35,7 +35,7 @@ cd api
 GHCR_TOKEN=your_pat ./deploy/deploy-ghcr.sh
 ```
 
-The Debian image builds the user's [Crush fork](https://github.com/andikapradanaarif/crush) at pinned revision `5f2586a7d1bacc3b60e2733042ae6538efa99e58` using a separate Go 1.27.3 stage (`CRUSH_REPO` / `CRUSH_REF` build args). Compose mounts `~/.config/crush` and `~/.local/share/crush`. No bubblewrap/socat or elevated sandbox capabilities are needed.
+The Debian image builds the user's [Crush fork](https://github.com/andikapradanaarif/crush) at pinned revision `759066acc9c0fd62dcb74bc8473e171dee9c11d2` using a separate Go 1.27.4 stage (`CRUSH_REPO` / `CRUSH_REF` build args). Compose mounts `~/.config/crush` and `~/.local/share/crush`. No bubblewrap/socat or elevated sandbox capabilities are needed.
 
 ## Local development
 

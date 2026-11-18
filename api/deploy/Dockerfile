@@ -10,9 +10,9 @@ RUN CGO_ENABLED=0 go build -o /build/elyoraa ./cmd/server && \
 
 # Build the user's Crush fork, pinned to the installed system revision.
 # The fork retains the upstream module path, so build from a checkout.
-FROM golang:1.27.3 AS crush-builder
+FROM golang:1.27.4 AS crush-builder
 ARG CRUSH_REPO=https://github.com/andikapradanaarif/crush.git
-ARG CRUSH_REF=5f2586a7d1bacc3b60e2733042ae6538efa99e58
+ARG CRUSH_REF=759066acc9c0fd62dcb74bc8473e171dee9c11d2
 RUN git init /crush && git -C /crush remote add origin "$CRUSH_REPO" && \
     git -C /crush fetch --depth 1 origin "$CRUSH_REF" && \
     git -C /crush checkout --detach FETCH_HEAD

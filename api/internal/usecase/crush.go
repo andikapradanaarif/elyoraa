@@ -38,7 +38,11 @@ func writeCrushConfig(dir string, repo *crushRepo) error {
 		"context_paths":  []string{}, "global_context_paths": []string{},
 		"skills_paths": []string{}, "disable_metrics": true, "auto_lsp": false,
 		"disable_provider_auto_update": true, "project_index": false,
-		"notebook_hydration": false,
+		"notebook_hydration": false, "progress": false,
+		// Pin the fork's experimental arms off so a future default flip
+		// can't change run behavior under a review job.
+		"edge_advisor": false, "evidence_gate": false, "fresh_review": false,
+		"find_bugs_review": false, "fold_turns": false, "fold_segments": false,
 	}
 	settings["permissions"] = map[string]any{"allowed_tools": []string{
 		"mcp_elyoraa_read_file", "mcp_elyoraa_list_files", "mcp_elyoraa_search", "mcp_elyoraa_git", "mcp_elyoraa_sync",

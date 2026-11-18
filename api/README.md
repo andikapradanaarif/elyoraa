@@ -113,8 +113,8 @@ api/
 
 Local development uses the system `crush` binary. The integration targets
 [andikapradanaarif/crush](https://github.com/andikapradanaarif/crush), currently
-`5f2586a7d1bacc3b60e2733042ae6538efa99e58`. Docker builds that fork at the same
-pinned revision (`CRUSH_REPO` / `CRUSH_REF` build arguments), using Go 1.27.3
+`759066acc9c0fd62dcb74bc8473e171dee9c11d2`. Docker builds that fork at the same
+pinned revision (`CRUSH_REPO` / `CRUSH_REF` build arguments), using Go 1.27.4
 for Crush; the API keeps its Go 1.25 builder.
 
 The runner invokes `crush run --quiet`, passes prompts over stdin, and reads
