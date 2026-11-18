@@ -15,7 +15,7 @@ A lightweight **respond agent** reads every bot mention in conversation context 
 
 In `keywords` mode, mention routing is done in Go before any agent runs: `classifyOversize` substring-matches the trigger comment against keyword lists. On `de-almas/nexus#486` this produced the incident below: a human explicitly accepted a split proposal and elyoraa posted a full review instead.
 
-With `MENTION_ROUTER=agent`, the mention path instead creates a small Devin run (the *respond* job) that sees the thread and picks an action from a fixed vocabulary — `request_review`, `request_split`, `request_issue_analysis`, `create_issues`, or just a reply. The agent declares actions in a dedicated ` ```elyoraa-actions ` fence; Go validates and executes. Nothing the agent emits can touch GitHub except through the bounded executor. The same pattern optionally backs the auto-review size gate: a manifest-level `gate` triage run decides review-vs-split on complexity signals that `lines ÷ rate` can't express (`SIZE_GATE_MODE`).
+With `MENTION_ROUTER=agent`, the mention path instead creates a small Crush run (the *respond* job) that sees the thread and picks an action from a fixed vocabulary — `request_review`, `request_split`, `request_issue_analysis`, `create_issues`, or just a reply. The agent declares actions in a dedicated ` ```elyoraa-actions ` fence; Go validates and executes. Nothing the agent emits can touch GitHub except through the bounded executor. The same pattern optionally backs the auto-review size gate: a manifest-level `gate` triage run decides review-vs-split on complexity signals that `lines ÷ rate` can't express (`SIZE_GATE_MODE`).
 
 ## Motivation — what went wrong on nexus#486
 
@@ -45,7 +45,7 @@ A second-order bug that contributed: `SizeLines` recorded for calibration includ
 - Live MCP write tools for the agent (`create_issue` etc.) — declared actions are strictly more auditable; revisit only if interactive reads prove insufficient.
 - True multi-turn sessions — statelessness + thread injection is enough.
 - Fully replacing the deterministic size gate — it stays as the *nomination* layer on the auto path; what it nominates to (`gate` triage vs `split`) is configurable (see § Agent-assisted size gate).
-- Routing by a second model/provider — the router is the same Devin CLI, just a smaller prompt.
+- Routing by a second model/provider — the router is the same Crush CLI, just a smaller prompt.
 
 ## Architecture
 
@@ -62,7 +62,7 @@ Each job type gets exactly the context its job needs — and no more:
 | `issue` | issue body + thread + worktree at HEAD | — |
 | `gate` | file manifest (path, +/−, generated-flag), size stats, PR title/body, read-only worktree (may `git diff`/`git log` or open files to judge complexity) | the rendered diff as input, the thread (none exists on the auto path) |
 
-The property that matters: **the agent that talks to the human is never the agent that judges the code.** Delegation happens through job enqueueing — `request_review` literally becomes a separate Devin run with a clean prompt. `TriggerComment` is only ever passed into `issue.md`, `split.md`, and `respond.md` template data — never `review.md` or `reconcile.md` (a test pins this).
+The property that matters: **the agent that talks to the human is never the agent that judges the code.** Delegation happens through job enqueueing — `request_review` literally becomes a separate Crush run with a clean prompt. `TriggerComment` is only ever passed into `issue.md`, `split.md`, and `respond.md` template data — never `review.md` or `reconcile.md` (a test pins this).
 
 ### Flow
 
@@ -77,9 +77,9 @@ GitHub webhook (mention-bearing events)
    └─ [worker: processRespond]
       ├─ optional worktree (same as processIssue: worktree if cloned, temp dir else)
       ├─ fetch full conversation (fetchConversation), prior job status (JobTracker)
-      ├─ render prompts/respond.md → runDevin(validateRespondOutput)
+      ├─ render prompts/respond.md → runCrush(validateRespondOutput)
       ├─ parse reply text + trailing ```elyoraa-actions block
-      ├─ ctx.Err() check (drop silently if superseded while Devin ran)
+      ├─ ctx.Err() check (drop silently if superseded while Crush ran)
       ├─ post reply as the pending comment
       └─ execute actions via bounded executor (auth + proposal checks in Go):
            • request_review    → dispatch(Type:"review", Origin: dispatched)
@@ -170,7 +170,7 @@ In `agent` mode, `@elyoraa /review`, `@elyoraa /split`, and `@elyoraa /accept` b
 1. **`applySizeGate` — intent before measurement.** `classifyOversize(r.TriggerComment)` runs before the size check: `oversizeCreate` → `Type:"split"`, `SplitCreate`, `Origin: accepted`, return; `oversizeReview` → return as review; else fall through to the size check. Only affects jobs with a `TriggerComment` (auto-reviews have none). `oversizeCreate` additionally requires an outstanding proposal — the latest tracker record for the PR is a completed `split` without `SplitCreate` — or everyday phrases like "breakdown" would mint issue-creation jobs on any PR.
 2. **`Process` — don't demote explicit intent.** The demotion branch is guarded by `!j.HasExplicitIntent()` — `dispatched`/`accepted`-origin jobs always reach `processOversize`/`processIssue` regardless of refined size.
 3. **`TryStart` — origin-ranked supersession** (see § Dedup).
-4. **Calibration input.** `Process` writes the refined (generated-excluded) line count back via `Tracker.Annotate` as `JobAnnotation.RefinedLines` — `Job.SizeLines` stays the enqueue-time base so `POST /jobs/retry` rescales from the right number. Refinement is skipped for truncated file lists (the manifest would undercount). `medianRate` prefers `AttemptSeconds` — the final Devin attempt's duration — over `DurationSeconds`, so queue wait and retry backoff don't distort the rate; calibration prefers same-repo samples before global fallback.
+4. **Calibration input.** `Process` writes the refined (generated-excluded) line count back via `Tracker.Annotate` as `JobAnnotation.RefinedLines` — `Job.SizeLines` stays the enqueue-time base so `POST /jobs/retry` rescales from the right number. Refinement is skipped for truncated file lists (the manifest would undercount). `medianRate` prefers `AttemptSeconds` — the final Crush attempt's duration — over `DurationSeconds`, so queue wait and retry backoff don't distort the rate; calibration prefers same-repo samples before global fallback.
 5. **`processIssue`/`processOversize` drop the marker on their final replies** — otherwise the analysis is filtered out of every future `fetchConversation` thread.
 
 ### Agent-assisted size gate — let the agent judge complexity, not lines
@@ -181,7 +181,7 @@ In `agent` mode, `@elyoraa /review`, `@elyoraa /split`, and `@elyoraa /accept` b
 - 1×–3× budget → `gate` triage job;
 - >3× budget or a truncated file list → `split` directly — clearly-huge PRs don't need an agent to agree, and this caps triage cost.
 
-A `gate` job is processed **inline by the worker** — it is not re-enqueued. `triageGate` renders `prompts/gate.md` — file manifest (path, +/−, generated flag), PR title/body, size stats — plus the read-only worktree, where the agent may `git diff`/`git log` or open files to judge complexity (it never sees a thread; none exists on the auto path). Devin replies with a verdict block:
+A `gate` job is processed **inline by the worker** — it is not re-enqueued. `triageGate` renders `prompts/gate.md` — file manifest (path, +/−, generated flag), PR title/body, size stats — plus the read-only worktree, where the agent may `git diff`/`git log` or open files to judge complexity (it never sees a thread; none exists on the auto path). Crush replies with a verdict block:
 
 ```json
 {"verdict": "review" | "split", "reason": "…"}
@@ -212,21 +212,21 @@ Supersession is driven by a single field instead of ad-hoc flag combinations: `R
 | Env | Default | Meaning |
 |---|---|---|
 | `MENTION_ROUTER` | `keywords` | `agent` enables the respond job; `keywords` keeps the deterministic path. Canary-able per deploy. |
-| `RESPOND_MODEL` | `DEVIN_MODEL` | Cheaper/faster model for routing runs is allowed; routing is easy. |
+| `RESPOND_MODEL` | `CRUSH_MODEL` | Cheaper/faster model for routing runs is allowed; routing is easy. |
 | `RESPOND_TIMEOUT` | `REVIEW_TIMEOUT` | Whole-job timeout for respond runs. |
 | `RESPOND_MAX_ACTIONS` | `4` | Belt on top of per-type rules; validated ≥1. |
 | `SIZE_GATE_MODE` | `deterministic` | `agent` sends borderline-oversize PRs to a `gate` triage run instead of auto-splitting. |
-| `GATE_MODEL` | `RESPOND_MODEL`, then `DEVIN_MODEL` | Triage is manifest-level — a cheap model suffices. |
+| `GATE_MODEL` | `RESPOND_MODEL`, then `CRUSH_MODEL` | Triage is manifest-level — a cheap model suffices. |
 | `GATE_TIMEOUT` | `5m` | Triage-pass budget only — the gate job itself gets `REVIEW_TIMEOUT`. |
 
-Per-type values reach the machinery: `Process`'s timeout wrapper, `attemptTimeout()`, and `devinPreflight`'s model-membership check all select by job type.
+Per-type values reach the machinery: `Process`'s timeout wrapper, `attemptTimeout()`, and `jobModel`/`crushPreflight` all select by job type.
 
 ### Failure modes & guardrails
 
 - **Malformed/absent reply:** `validateRespondOutput` requires non-empty text; an `elyoraa-actions` block present but unparseable → transient retry. After final failure: post the stripped text reply if any, else a fallback pointing at the slash commands. Never silent.
 - **Actions lost on parse failure:** the reply still posts, actions drop, user re-asks. Safer than half-executed actions.
 - **`create_issues` without authorization or proposal:** enforced in Go — `mayCreateIssues` at the executor *and* inside `createIssues` itself, plus the outstanding-proposal check and the ≤10 cap. The prompt instructs too, but the code doesn't rely on it.
-- **Superseded run acting anyway:** `processRespond`, `processIssue`, and `processOversize` re-check `ctx.Err()` after `runDevin` returns and before posting replies or executing actions — a job cancelled mid-run can't still comment or create issues.
+- **Superseded run acting anyway:** `processRespond`, `processIssue`, and `processOversize` re-check `ctx.Err()` after `runCrush` returns and before posting replies or executing actions — a job cancelled mid-run can't still comment or create issues.
 - **Loop safety:** bot-authored comments are already filtered upstream; the bot's own reply can never re-trigger a respond job.
 - **Token/cost bounds:** no diff in prompt, bounded thread (80 / 64 KB merged), worktree optional → respond is the cheapest run in the system.
 - **Queue latency:** respond jobs share `MaxConcurrentReviews` workers (default 2) with long reviews — the snappy-reply goal stalls behind a 15-minute run. See open questions.
@@ -237,12 +237,12 @@ Per-type values reach the machinery: `Process`'s timeout wrapper, `attemptTimeou
 - No new GitHub App permissions — everything executes through existing client methods.
 - The agent still can't write: side effects flow exclusively through the declared-action executor.
 - `author_association` is enforced in Go for action-bearing mentions (`mayDispatch`/`mayCreateIssues`) — on public repos a random commenter can get a reply but cannot trigger reviews, splits, or issue creation.
-- The worktree is read-only per existing Devin permission config.
+- The worktree is read-only per the generated Crush job policy.
 - Remaining exposure: prompt-injection can still steer *authorized* users' mentions toward wrong-but-permitted actions, and created-issue bodies carry quoted thread text — `createIssues` sanitizes `@mentions` out of issue bodies.
 
 ### Trade-offs (honest)
 
-- **Latency:** one extra Devin run before a review starts on the mention path. Mitigated by the reply posting first — the conversation feels instant even though the review is async. Auto-review pays nothing.
+- **Latency:** one extra Crush run before a review starts on the mention path. Mitigated by the reply posting first — the conversation feels instant even though the review is async. Auto-review pays nothing.
 - **Cost:** a small run per mention. `RESPOND_MODEL` can point at a cheaper model.
 - **Non-determinism:** misrouting becomes an LLM error instead of a keyword miss. Contained by: tiny action vocabulary, thread + `PriorJobStatus` grounding, strict parse-and-retry, code-level authorization, per-action caps, every chosen action logged on `JobRecord.Actions`, slash commands as an escape hatch, and `MENTION_ROUTER=keywords` as an instant rollback.
 - **Two routers to maintain** during transition — bounded by the config flag.
@@ -296,7 +296,7 @@ Still TODO:
 
 1. Router is a **job type**, not middleware — reuses queue/dedup/retry/timeout infra wholesale.
 2. Actions are **declared in a dedicated `elyoraa-actions` fence**, executed by Go — no live write tools, no ambiguity with ordinary JSON in a reply.
-3. Delegation is **enqueue, not spawn** — workers are separate Devin runs on the same queue; the bias firewall is the context contract, not a different model.
+3. Delegation is **enqueue, not spawn** — workers are separate Crush runs on the same queue; the bias firewall is the context contract, not a different model.
 4. Determinism owns *nomination*, agents own *decisions* — the auto path keeps deterministic bands (≤1× review, 1×–3× gate, >3×/truncated split); the mention path delegates wholesale to `respond`.
 5. `MENTION_ROUTER`/`SIZE_GATE_MODE` rollback flags stay until the agent modes are proven.
 6. Respond runs get the worktree when available (question-answering needs code), but the prompt forbids emitting review verdicts.
@@ -311,7 +311,7 @@ Still TODO:
 - ~~`MENTION_ROUTER`/`SIZE_GATE_MODE` per-repo override~~ — shipped: `.elyoraa.yml` on the default branch (`enabled`, `budget_minutes`, `lines_per_minute`, `ignored_paths`, `mention_router`, `size_gate_mode`, `skip_label`), read via `git show HEAD:` so PRs can't alter their own policy.
 - Agent-gate nomination band: is 1×–3× the right range? Lowering the bottom catches subtle PRs; the >3× cap bounds triage cost.
 - Should respond jobs get a dedicated worker/priority lane (`RESPOND_CONCURRENCY`)? They share `MAX_CONCURRENT_REVIEWS` workers with 10–15 min reviews, so a reply can sit behind two reviews — the "snappy" goal suffers under load.
-- Ops deferred from the production-hardening pass: missed-webhook recovery (App deliveries API or open-PR reconciliation), Devin service credentials + preflight-failure alerting, and `prometheus/client_golang` migration + queue-wait/rate-limit/alerting metrics. Shipped since: per-PR opt-out label (`PR_SKIP_LABEL`, per-repo `skip_label`), `elyoraa_reactions_total` reaction metrics, clone-on-demand with `GIT_BASE_URL`, `.elyoraa.yml` per-repo config, and `QUEUE_BACKEND=postgres` for multi-replica (queue claims via `FOR UPDATE SKIP LOCKED` + lease expiry; dedup claims + supersede flags in `job_claims`).
+- Ops deferred from the production-hardening pass: missed-webhook recovery (App deliveries API or open-PR reconciliation), Crush provider credentials + preflight-failure alerting, and `prometheus/client_golang` migration + queue-wait/rate-limit/alerting metrics. Shipped since: per-PR opt-out label (`PR_SKIP_LABEL`, per-repo `skip_label`), `elyoraa_reactions_total` reaction metrics, clone-on-demand with `GIT_BASE_URL`, `.elyoraa.yml` per-repo config, and `QUEUE_BACKEND=postgres` for multi-replica (queue claims via `FOR UPDATE SKIP LOCKED` + lease expiry; dedup claims + supersede flags in `job_claims`).
 
 ## Resolved in implementation
 

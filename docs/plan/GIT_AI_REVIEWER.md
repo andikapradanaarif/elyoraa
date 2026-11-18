@@ -1,4 +1,4 @@
-> Runtime update: elyoraa now uses the installed [Crush fork](https://github.com/andikapradanaarif/crush). The historical Devin CLI/config/sandbox details below are superseded by [the current runtime notes](../../api/README.md#crush-runtime).
+> **Status: historical design record — the original Devin CLI plan.** elyoraa now runs the [Crush fork](https://github.com/andikapradanaarif/crush); the Devin CLI/config/sandbox/skill mechanics below are superseded by [the current runtime notes](../../api/README.md#crush-runtime). The architecture ideas — bare-clone cache, per-review worktrees, job dedup, queue phases, GIT_ASKPASS credentials, GitHub App scoping — carried over largely intact. Later hardening (mention router, size-gate triage, job tracker, Postgres queue) is documented in `MENTION_ROUTER.md` and `AGENTS.md`.
 
 # elyoraa — AI PR Reviewer
 
@@ -204,33 +204,32 @@ Default is **2**. Add 2 GB swap as an OOM safety net.
 
 The Go service lives under `elyoraa/api/` with the module at `github.com/andikapradanaarif/elyoraa`.
 
+Current layout (the tree below reflects the implementation, not the original plan):
+
 ```
 elyoraa/
 ├── api/
-│   ├── go.mod
-│   ├── main.go                  # entrypoint, loads config, starts HTTP server
+│   ├── cmd/
+│   │   ├── server/              # entrypoint: config, HTTP server, worker pool
+│   │   └── migrate/             # Postgres schema migrations
 │   ├── internal/
-│   │   ├── config/              # env loading (PORT, secrets, paths, concurrency limits)
-│   │   ├── github/              # GitHub App auth, PR fetch, diff, post review (inline + summary)
-│   │   ├── cache/               # bare-clone cache: singleflight clone, token-less URL, fork-ref fetch, worktree lifecycle, LRU eviction
-│   │   ├── reviewer/            # orchestrates: worktree → render prompt → run devin → parse output
-│   │   ├── queue/               # review queue: in-memory (phase 1) / file-backed BoltDB/WAL (phase 1.5) / Redis (phase 2)
-│   │   ├── dedup/               # job key tracking + in-flight cancellation
-│   │   ├── webhook/             # HTTP handler, event routing, signature verify, draft/bot skip
-│   │   └── middleware/          # request ID and access logging
-│   ├── prompts/
-│   │   └── review.md            # review prompt template (rendered to temp file per review)
-│   └── deploy/
-│       ├── devin-config.json    # elyoraa's Devin config: mem0-mcp, permission allow/deny rules (baked into container at /app/)
-│       ├── skills/
-│       │   └── pr-review/
-│       │       └── SKILL.md     # pr-review skill content (installed to ~/.config/devin/skills/pr-review/SKILL.md or inlined in prompt)
-│       ├── git-askpass.sh       # GIT_ASKPASS helper for installation tokens
-│       ├── Dockerfile           # multi-stage: golang build → runtime with devin + bwrap + socat
-│       └── docker-compose.yml   # elyoraa service + volumes (WORKSPACE_BASE, ~/.config/devin, /tmp/elyoraa)
+│   │   ├── config/              # env loading + validation
+│   │   ├── handler/             # HTTP routes: webhook, health, jobs, metrics, admin
+│   │   ├── usecase/             # webhook → enqueue → review orchestration, Crush runner
+│   │   ├── service/github/      # GitHub App auth, PR fetch, review post, secret redaction
+│   │   ├── repository/          # queue (memory/file/postgres), job records, clone cache, worktrees
+│   │   ├── dedup/               # job-key claims, origin-ranked supersession, delivery-ID fencing
+│   │   ├── metrics/             # Prometheus counters/histograms
+│   │   ├── middleware/          # request ID, access logging
+│   │   ├── domain/              # shared types
+│   │   └── startup/             # boot checks, reconcilers, sweepers
+│   ├── prompts/                 # review / reconcile / split / issue / respond / gate templates
+│   ├── migration/               # Postgres schema (go:embed migrations + runner)
+│   └── deploy/                  # Dockerfile, compose, git-askpass, GHCR push script
 ├── docs/plan/
-│   └── GIT_AI_REVIEWER.md       # this document
-├── .gitignore
+│   ├── GIT_AI_REVIEWER.md       # this document
+│   └── MENTION_ROUTER.md        # mention router + agent size-gate design record
+├── AGENTS.md
 └── README.md
 ```
 
